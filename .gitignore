@@ -1,0 +1,17 @@
+# Agent (C)
+agent/observer-agent
+agent/**/*.o
+agent/tests/test_cpu
+agent/tests/test_memory
+agent/tests/test_config
+
+# Collector (Rust) - preparado para cuando exista collector/
+collector/target/
+
+# Dashboard - preparado para cuando exista dashboard/
+dashboard/node_modules/
+dashboard/dist/
+
+# Misc
+.DS_Store
+*.log
