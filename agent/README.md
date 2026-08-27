@@ -4,10 +4,11 @@ Agente de observabilidad en C para hosts Linux, escrito con un presupuesto
 de recursos explícito: pocas dependencias, sin llamadas a binarios externos
 (`top`, `free`, `ps`, ...), lectura directa de `/proc` y `/sys`.
 
-> Estado actual: **Fase 1** — collectors de CPU y memoria, config parsing,
-> logging, y serialización del payload a JSON. El transporte HTTPS real, el
-> heartbeat, y el resto de collectors (disk, network, filesystem, uptime,
-> procesos) llegan en la Fase 2. Ver [`../PHASES.md`](../PHASES.md).
+> Estado actual: **Fase 2** — resto de collectors (disk, network,
+> filesystem, uptime, process, temperature), transporte HTTP real sobre
+> sockets POSIX, heartbeat como canal independiente de las métricas,
+> retry con backoff exponencial + jitter, e identidad persistente del
+> agent. Ver [`../PHASES.md`](../PHASES.md).
 
 ## Por qué C
 
@@ -16,6 +17,14 @@ En resumen: el agente necesita interactuar directamente con interfaces
 POSIX/Linux y mantener un footprint mínimo (objetivo de diseño: < 5 MB RSS,
 < 1% CPU promedio en el hardware de referencia), y eso pesa más que la
 comodidad de un runtime más pesado.
+
+## Transporte: HTTP plano por ahora, TLS en Fase 8
+
+Ver [`docs/adr/0002-transport-protocol.md`](../docs/adr/0002-transport-protocol.md).
+`collector_url` debe empezar con `http://` en esta fase — `https://` es
+rechazado explícitamente (con un error claro) en vez de degradar
+silenciosamente a texto plano. **No usar sobre una red no confiable
+todavía.**
 
 ## Build
 
@@ -40,17 +49,20 @@ Si no se pasa ruta, busca `/etc/observer/agent.conf`. Si el archivo no
 existe, corre con valores por defecto (ver `config_set_defaults` en
 `src/config.c`) y lo indica por log — no es un error fatal.
 
-En esta fase, el agente imprime cada muestra como una línea JSON por
-`stdout` en vez de enviarla al Collector (eso es Fase 2):
+El agent corre en foreground (para ejecutarlo como daemon, envolverlo en
+un unit de systemd — pendiente para una fase posterior). Cada
+`metrics_interval_secs` recolecta una muestra completa y la envía por
+`POST {collector_url}/api/v1/metrics`; cada `heartbeat_interval_secs`
+(canal independiente, ver informe sección 24) envía un heartbeat liviano
+por `POST {collector_url}/api/v1/agents/heartbeat`. Ambos incluyen
+`Authorization: Bearer {agent_token}` si está configurado.
 
-```json
-{"protocol_version":1,"agent_id":"...","timestamp":1787695105,"metrics":{"system.cpu.utilization":0.0010,...}}
-```
-
-La primera muestra de CPU siempre se descarta (`system.cpu.*` no aparece):
-la utilización se calcula por delta entre dos snapshots de `/proc/stat`
-(ver sección 9 del informe técnico), así que la primera lectura solo sirve
-para establecer el punto de partida.
+Si un envío falla (Collector caído, timeout, respuesta no-2xx), el
+agent no bloquea el resto del loop: aplica backoff exponencial + jitter
+(1s, 2s, 4s, 8s, 16s, 30s, 30s...) antes del próximo intento **de ese
+canal**, y sigue recolectando/enviando el otro canal normalmente. En el
+próximo intento se envía una muestra fresca, no la vieja (informe
+sección 27: sin buffer local en V1).
 
 ## Configuración
 
@@ -58,7 +70,7 @@ Formato plano `clave = valor`, una entrada por línea, `#` para comentarios:
 
 ```ini
 # /etc/observer/agent.conf
-collector_url = https://collector.local:8443
+collector_url = http://collector.local:8080
 agent_token = <token>
 agent_id_path = /etc/observer/agent-id
 
@@ -72,50 +84,85 @@ read_timeout_secs = 5
 log_level = info
 ```
 
-Se eligió deliberadamente no usar una librería TOML/YAML externa: el
-formato es simple y esto mantiene el binario liviano y con pocas
-dependencias.
+`collector_url` debe usar `http://` en esta fase (ver nota de TLS más
+arriba). Se eligió deliberadamente no usar una librería TOML/YAML
+externa: el formato es simple y esto mantiene el binario liviano y con
+pocas dependencias.
+
+## Identidad del agent
+
+El agent NO depende del hostname para identificarse (informe sección
+20): la primera vez que corre, genera un id aleatorio de 128 bits
+(vía `/dev/urandom`) y lo persiste en `agent_id_path` (default
+`/etc/observer/agent-id`) con permisos `0600`. Corridas siguientes
+reutilizan ese mismo id. Si el archivo no se puede crear/leer (permisos,
+directorio inexistente), el agent sigue funcionando con un id generado
+en memoria solo para esa ejecución — no es un error fatal, pero no
+sobrevive a un reinicio.
 
 ## Estructura
 
 ```
 agent/
 ├── src/
-│   ├── main.c              # loop principal
+│   ├── main.c              # loop principal (scheduling monotonic, retry)
 │   ├── config.c            # parser de configuración
-│   ├── agent.c             # utilidades comunes (status codes)
-│   ├── protocol.c          # serialización JSON del payload
-│   ├── logging.c           # logger con niveles
+│   ├── agent.c              # utilidades comunes (status codes)
+│   ├── protocol.c           # serialización JSON (sample + heartbeat)
+│   ├── transport.c          # cliente HTTP sobre sockets POSIX
+│   ├── retry.c               # backoff exponencial + jitter
+│   ├── identity.c            # identidad persistente del agent
+│   ├── logging.c            # logger con niveles
 │   └── collectors/
-│       ├── cpu.c           # /proc/stat, delta-based utilization
-│       └── memory.c        # /proc/meminfo
-├── include/                 # headers correspondientes
-├── tests/                   # tests unitarios (sin framework externo)
+│       ├── cpu.c            # /proc/stat, delta-based utilization
+│       ├── memory.c         # /proc/meminfo
+│       ├── disk.c            # /proc/diskstats, tasas de I/O
+│       ├── network.c        # /proc/net/dev, tasas por interfaz
+│       ├── filesystem.c     # /proc/mounts + statvfs()
+│       ├── uptime.c         # /proc/uptime
+│       ├── process.c        # /proc/<pid>/stat, conteo agregado
+│       └── temperature.c    # /sys/class/thermal (opcional)
+├── include/                  # headers correspondientes
+├── tests/                    # tests unitarios (sin framework externo)
 ├── Makefile
 └── README.md
 ```
 
 ## Tests
 
-`make test` compila y corre `tests/test_cpu`, `tests/test_memory` y
-`tests/test_config`. Son binarios standalone (sin framework externo) que
+`make test` compila y corre 11 suites (`test_cpu`, `test_memory`,
+`test_config`, `test_disk`, `test_network`, `test_filesystem`,
+`test_uptime`, `test_process`, `test_retry`, `test_transport`,
+`test_identity`). Son binarios standalone (sin framework externo) que
 usan un macro `CHECK()` simple y devuelven código de salida != 0 si algo
 falla — pensado para poder engancharlos directo a CI.
 
-Casos cubiertos:
+Casos cubiertos (además de lo ya descripto en Fase 1):
 
-- **CPU**: parseo de línea válida/inválida, argumentos nulos, cálculo de
-  delta/utilización, detección conceptual de counter reset.
-- **Memoria**: parseo con y sin `MemAvailable` (fallback a `MemFree`),
-  `MemTotal` ausente (debe fallar), argumentos nulos.
-- **Config**: defaults, carga desde archivo (incluyendo override parcial y
-  claves desconocidas), archivo inexistente (debe conservar defaults).
+- **Disk/Network**: parseo de `/proc/diskstats` y `/proc/net/dev`,
+  filtrado de particiones/loopback, contrato de "primera lectura sin
+  delta".
+- **Filesystem**: filtrado de filesystems pseudo/virtuales, parseo de
+  `/proc/mounts`, integración liviana contra el sistema real.
+- **Uptime/Process**: parseo, y ejecución real contra `/proc` del
+  contenedor (siempre hay al menos un proceso corriendo).
+- **Retry**: crecimiento exponencial del backoff, clamp al máximo,
+  reproducibilidad con la misma seed, manejo del caso seed=0.
+- **Transport**: parseo de URL (`http://`/`https://`, puertos
+  explícitos/default, errores de esquema/puerto inválido) — sin abrir
+  sockets.
+- **Identity**: generación + persistencia con permisos `0600`, reuso de
+  un id existente, manejo de archivo corrupto, argumentos inválidos.
 
-## Próximos pasos (Fase 2)
+Validado además con una prueba de integración real (agent real +
+mock collector HTTP en Python) confirmando el flujo completo
+`collect → serialize → POST → retry` con backoff correcto ante fallos
+de conexión, y con `make sanitize` (ASan + UBSan) sin hallazgos tras
+ejercitar los paths de red reales.
 
-- `transport.c`: cliente HTTP con connect/write/read timeouts y retry con
-  backoff exponencial + jitter (informe, secciones 26–27).
-- Collectors de disk, network, filesystem, uptime y process count.
-- Heartbeat como canal independiente de las métricas.
-- Generación/persistencia real de `agent_id` (actualmente hay un
-  placeholder si `/etc/observer/agent-id` no existe).
+## Próximos pasos (Fase 3+)
+
+- Collector en Rust: registro de agentes, ingestion con validación,
+  autenticación por bearer token, persistencia en PostgreSQL.
+- TLS en el transporte del agent (Fase 8, ver ADR-0002).
+- Generación de un unit de systemd para correr el agent como daemon.

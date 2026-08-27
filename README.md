@@ -39,6 +39,11 @@ personal-observability/
 
 ## Estado actual
 
-**Fase 1 completa**: agent en C con collectors de CPU y memoria, config,
-logging y serialización del payload. Ver
+**Fase 2 completa**: agent en C con todos los collectors del sistema
+(CPU, memoria, disk, network, filesystem, uptime, procesos, temperatura
+opcional), transporte HTTP real sobre sockets POSIX, heartbeat
+independiente, retry con backoff+jitter, e identidad persistente. Ver
 [`agent/README.md`](agent/README.md) para build, uso y tests.
+
+TLS todavía no está implementado (queda para la Fase 8 de hardening) —
+ver [`docs/adr/0002-transport-protocol.md`](docs/adr/0002-transport-protocol.md).

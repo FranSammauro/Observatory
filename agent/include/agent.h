@@ -13,7 +13,7 @@
 #define OBS_MAX_LINE           512
 #define OBS_MAX_PATH            256
 #define OBS_MAX_HOSTNAME         256
-#define OBS_MAX_JSON_BUFFER     4096
+#define OBS_MAX_JSON_BUFFER     16384
 #define OBS_MAX_INTERFACES        16
 #define OBS_MAX_FILESYSTEMS       16
 

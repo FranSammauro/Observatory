@@ -48,4 +48,5 @@ void log_log(log_level_t level, const char *component, const char *fmt, ...)
     va_end(args);
 
     fprintf(out, "\n");
+    fflush(out); /* logs no deben perderse si el proceso muere abruptamente */
 }

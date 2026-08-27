@@ -8,7 +8,7 @@ desarrollo con commits progresivos.
       config parsing, logging, serialización JSON del payload, tests
       unitarios, build limpio con `-Wall -Wextra -Wpedantic -Wconversion
       -Wshadow` y con AddressSanitizer/UBSan. ADR-0001 (elección de C).
-- [ ] **Fase 2 — Agent: resto de collectors + transporte**
+- [x] **Fase 2 — Agent: resto de collectors + transporte**
       Disk, network, filesystem, uptime, process count, temperatura
       opcional, `transport.c` (HTTP client con timeouts), retry con
       backoff+jitter, heartbeat, identidad persistente del agent.
@@ -64,3 +64,52 @@ desarrollo con commits progresivos.
   `/etc/observer/agent-id` no existe).
 - Resto de collectors (disk, network, filesystem, uptime, procesos,
   temperatura, métricas custom).
+
+## Fase 2 — detalle
+
+**Entregado:**
+
+- `agent/src/collectors/{disk,network,filesystem,uptime,process,temperature}.c`
+  + headers correspondientes.
+- `agent/src/transport.c` — cliente HTTP sobre sockets POSIX (sin
+  libcurl ni otra dependencia externa), con connect/write/read timeouts
+  explícitos. `https://` se rechaza explícitamente (TLS diferido a
+  Fase 8 — ver ADR-0002).
+- `agent/src/retry.c` — backoff exponencial + jitter (xorshift32,
+  reproducible con seed).
+- `agent/src/identity.c` — identidad persistente del agent (128 bits
+  vía `/dev/urandom`, persistida con permisos 0600, con manejo de
+  carrera entre instancias concurrentes vía `O_EXCL`).
+- `agent/src/protocol.c` reescrito: serializa las 7 categorías de
+  métricas (cpu, memory, uptime, process, temperature como escalares;
+  disk, network, filesystem como arrays) + un payload de heartbeat
+  separado y más liviano.
+- `agent/src/main.c` reescrito: scheduling con `CLOCK_MONOTONIC`
+  (nunca wall clock) para metrics y heartbeat de forma independiente;
+  ante fallo de envío, backoff sin bloquear el loop ni el otro canal.
+- 8 suites de tests nuevas (`test_disk`, `test_network`,
+  `test_filesystem`, `test_uptime`, `test_process`, `test_retry`,
+  `test_transport`, `test_identity`) — 11/11 en total.
+- `docs/adr/0002-transport-protocol.md`.
+
+**Validado en este entorno:**
+
+- Build limpio (`make all`) sin warnings.
+- `make test` — 11/11 suites en verde.
+- `make sanitize` (ASan + UBSan) corriendo un flujo real de ~16 requests
+  HTTP contra un mock collector local (heartbeat + metrics con retry
+  incluido) — sin hallazgos.
+- Prueba de integración manual: agent real → mock collector Python,
+  confirmando JSON bien formado, header `Authorization: Bearer`
+  correcto, y backoff exponencial real (1s → 2s → 4s) ante fallos de
+  conexión.
+
+**Pendiente explícitamente para después (no es parte de Fase 2):**
+
+- TLS en el transporte (Fase 8 — ver ADR-0002).
+- El Collector en Rust que efectivamente reciba estos payloads
+  (Fase 3+) — hasta ahora solo se validó contra un mock de prueba, no
+  forma parte del repo.
+- Unit de systemd para correr el agent como daemon.
+- Buffer local / spool en disco ante interrupciones prolongadas
+  (explícitamente fuera de alcance para V1 según el informe, sección 27).

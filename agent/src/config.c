@@ -29,7 +29,7 @@ void config_set_defaults(obs_config_t *config)
     memset(config, 0, sizeof(*config));
 
     snprintf(config->collector_url, sizeof(config->collector_url),
-              "https://127.0.0.1:8443");
+              "http://127.0.0.1:8080");
     config->agent_token[0] = '\0';
     snprintf(config->agent_id_path, sizeof(config->agent_id_path),
               "/etc/observer/agent-id");
