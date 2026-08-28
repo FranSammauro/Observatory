@@ -19,7 +19,7 @@ use crate::config::Config;
 use crate::db;
 use crate::error::ApiError;
 use crate::models::{HeartbeatPayload, MetricsPayload, Validate};
-use crate::query::{RebootsQuery, SeriesQuery};
+use crate::query::{AlertsQuery, HistoryQuery, RebootsQuery, SeriesQuery};
 use crate::state::{connectivity_state, StateLimits};
 use crate::validation::{utc_from_unix_ts, TimeLimits};
 
@@ -56,6 +56,8 @@ pub fn build_router(state: AppState) -> Router {
             "/api/v1/alerts/rules/{rule_id}",
             delete(delete_rule_handler),
         )
+        .route("/api/v1/alerts", get(list_alerts_handler))
+        .route("/api/v1/alerts/history", get(alert_history_handler))
         .layer(DefaultBodyLimit::max(state.config.max_body_bytes))
         .with_state(state)
 }
@@ -346,6 +348,49 @@ async fn list_rules_handler(
     let body: Vec<_> = rules.iter().map(rule_json).collect();
     tracing::debug!(n = body.len(), "query: reglas de alerta");
     Ok(Json(json!({"rules": body, "count": body.len()})))
+}
+
+async fn list_alerts_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    params: std::result::Result<Query<AlertsQuery>, QueryRejection>,
+) -> Result<impl IntoResponse> {
+    check_bearer(&headers, &state.config.auth_token)?;
+
+    let filter = params
+        .map_err(|_| ApiError::bad_request("invalid_query", "parametros de query invalidos"))?
+        .0
+        .into_filter()?;
+
+    let alerts =
+        db::list_active_alerts(&state.pool, filter.agent_id, filter.state.as_deref()).await?;
+    tracing::debug!(n = alerts.len(), "query: alertas activas");
+    Ok(Json(json!({"alerts": alerts, "count": alerts.len()})))
+}
+
+async fn alert_history_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    params: std::result::Result<Query<HistoryQuery>, QueryRejection>,
+) -> Result<impl IntoResponse> {
+    check_bearer(&headers, &state.config.auth_token)?;
+
+    let filter = params
+        .map_err(|_| ApiError::bad_request("invalid_query", "parametros de query invalidos"))?
+        .0
+        .into_filter()?;
+
+    let events = db::list_alert_history(
+        &state.pool,
+        filter.agent_id,
+        filter.rule_id,
+        filter.from,
+        filter.to,
+        filter.limit,
+    )
+    .await?;
+    tracing::debug!(n = events.len(), "query: historial de alertas");
+    Ok(Json(json!({"events": events, "count": events.len()})))
 }
 
 async fn delete_rule_handler(

@@ -354,8 +354,48 @@ pub fn next_step(
 }
 
 /*
+ * Historial (bloque 5.3): una transicion de estado se registra en
+ * `alert_events` solo cuando la maquina CAMBIA de estado (creacion,
+ * promocion o resolucion). `from = None` significa desde INACTIVE (no
+ * habia fila). Stay* / StartResolving / StayResolving no emiten evento:
+ * ahi radica la idempotencia de las transiciones.
+ */
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EventState {
+    Pending,
+    Firing,
+    Resolved,
+}
+
+impl EventState {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            EventState::Pending => "pending",
+            EventState::Firing => "firing",
+            EventState::Resolved => "resolved",
+        }
+    }
+}
+
+impl From<AlertState> for EventState {
+    fn from(s: AlertState) -> Self {
+        match s {
+            AlertState::Pending => EventState::Pending,
+            AlertState::Firing => EventState::Firing,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct Event {
+    pub from: Option<EventState>,
+    pub to: EventState,
+}
+
+/*
  * Operaciones que el evaluador le pide a db::apply_alert_steps (una
- * transaccion por ciclo).
+ * transaccion por ciclo). Los pasos que cambian de estado llevan el
+ * `Event` que se inserta en `alert_events` en la misma transaccion.
  */
 #[derive(Debug, Clone, Copy)]
 pub enum AlertOp {
@@ -364,6 +404,7 @@ pub enum AlertOp {
         agent_id: Uuid,
         state: AlertState,
         since: DateTime<Utc>,
+        event: Option<Event>,
     },
     StartResolving {
         rule_id: i64,
@@ -372,6 +413,7 @@ pub enum AlertOp {
     Resolved {
         rule_id: i64,
         agent_id: Uuid,
+        event: Event,
     },
 }
 
@@ -504,6 +546,10 @@ pub async fn eval_cycle(pool: &PgPool, config: &Config) -> Result<EvalSummary, s
                     agent_id,
                     state: AlertState::Pending,
                     since,
+                    event: Some(Event {
+                        from: None,
+                        to: EventState::Pending,
+                    }),
                 });
                 tracing::info!(rule = rule_name, %agent_id, ?since, "alerta pending");
             }
@@ -514,6 +560,10 @@ pub async fn eval_cycle(pool: &PgPool, config: &Config) -> Result<EvalSummary, s
                     agent_id,
                     state: AlertState::Firing,
                     since,
+                    event: Some(Event {
+                        from: None,
+                        to: EventState::Firing,
+                    }),
                 });
                 tracing::info!(rule = rule_name, %agent_id, ?since, "alerta firing");
             }
@@ -524,6 +574,7 @@ pub async fn eval_cycle(pool: &PgPool, config: &Config) -> Result<EvalSummary, s
                     agent_id,
                     state: AlertState::Pending,
                     since,
+                    event: None,
                 });
             }
             Step::ToFiring { since } => {
@@ -533,6 +584,10 @@ pub async fn eval_cycle(pool: &PgPool, config: &Config) -> Result<EvalSummary, s
                     agent_id,
                     state: AlertState::Firing,
                     since,
+                    event: Some(Event {
+                        from: Some(EventState::Pending),
+                        to: EventState::Firing,
+                    }),
                 });
                 tracing::info!(rule = rule_name, %agent_id, ?since, "alerta firing (pending -> firing)");
             }
@@ -543,6 +598,7 @@ pub async fn eval_cycle(pool: &PgPool, config: &Config) -> Result<EvalSummary, s
                     agent_id,
                     state: AlertState::Firing,
                     since,
+                    event: None,
                 });
             }
             Step::StartResolving => {
@@ -552,7 +608,15 @@ pub async fn eval_cycle(pool: &PgPool, config: &Config) -> Result<EvalSummary, s
             }
             Step::Resolved => {
                 summary.resolved += 1;
-                ops.push(AlertOp::Resolved { rule_id, agent_id });
+                let event = Event {
+                    from: cur.map(|c| c.state.into()),
+                    to: EventState::Resolved,
+                };
+                ops.push(AlertOp::Resolved {
+                    rule_id,
+                    agent_id,
+                    event,
+                });
                 tracing::info!(rule = rule_name, %agent_id, "alerta resuelta");
             }
         }

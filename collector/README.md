@@ -4,9 +4,10 @@ Collector central en **Rust (Axum)** que recibe los payloads que emite el
 agent C (`observer-agent`), los valida, los autentica por bearer token, y
 los persiste en PostgreSQL.
 
-> Estado actual: **Fase 4** (entregada) — query API de lectura (4.1),
-> maquina de estados de conectividad (4.2) y deteccion de reboot (4.3).
-> Ver [`../PHASES.md`](../PHASES.md).
+> Estado actual: **Fase 5** (entregada) — alert engine completo: reglas
+> declarativas y evaluador (5.1), maquina de estados con hysteresis (5.2)
+> y deduplicacion + historial + query API (5.3). Fases 4, 4.2 y 4.3
+> tambien entregadas. Ver [`../PHASES.md`](../PHASES.md).
 
 ## Arquitectura
 
@@ -68,6 +69,46 @@ Infra:
 
 - `GET /healthz` — chequeo de salud (incluye ping a la DB).
 
+Alert engine (Fase 5) — gestion de reglas y consulta de estado/historial,
+mismo bearer token:
+
+- `GET /api/v1/alerts/rules` y `POST /api/v1/alerts/rules` — listar y
+  crear reglas declarativas.
+  El payload es `{name, metric_name, entity?, op, threshold, for_secs?}`
+  con `op` en `ge|gt|le|lt` y `for_secs` default 0:
+  - `201` con la regla creada; `400 rule_already_exists` si el `name` ya
+    existe (UNIQUE en la DB); `400 invalid_rule` si el payload u `op` no
+    es valido (`ge|gt|le|lt`), `entity` no es un label no vacio,
+    `threshold` no es finito o `for_secs` es negativo.
+- `DELETE /api/v1/alerts/rules/{rule_id}` — borrar una regla; `404
+  unknown_rule` si no existe, `400 invalid_rule_id` si no es entero. Su
+  alerta activa y su historial se limpian (FK ON DELETE CASCADE).
+- `GET /api/v1/alerts` — alertas **activas** (pending/firing) con el
+  contexto de la regla (`rule_name`, `metric_name`, `entity`, `op`,
+  `threshold`) y el estado de la maquina (`since`, `resolve_from`,
+  `checked_at`). Query params opcionales `agent_id` (UUID valido) y
+  `state` (`pending|firing`); `400 invalid_alert_state` /
+  `invalid_agent_id` si no cumplen.
+- `GET /api/v1/alerts/history` — historial de transiciones (creaciones,
+  promociones y resoluciones) ordenado DESC; respuesta `{events[],
+  count}` con `{id, rule_id, rule_name, agent_id, from_state, to_state,
+  ts}`. `from_state` es NULL en la creacion (desde INACTIVE). Query
+  params opcionales `agent_id`, `rule_id`, `from`/`to` (epoch,
+  `from <= to`) y `limit` (default 50, tope 1000).
+
+Maquina de estados (bloque 5.2): INACTIVE -> PENDING -> FIRING ->
+RESOLVED, derivada en `alerts.next_step` a partir del veredicto del
+evaluador (`alerts.evaluate_series`). INACTIVE es la ausencia de fila en
+`alerts`, y al resolver se borra y se registra el evento. Hysteresis:
+una FIRING cuya condicion cae no se resuelve al instante, entra en
+`resolve_from` y solo pasa a RESOLVED cuando la ausencia supera
+`OBS_ALERT_RESOLVE_GRACE_SECS` (default 60s; 0 = inmediato); una PENDING
+cuyo tramo cae se resuelve de inmediato. Los eventos de
+`alert_events` (bloque 5.3) se escriben solo en transiciones reales en
+la misma transaccion que aplica el estado: idempotente, sin duplicar
+creaciones/promociones/resoluciones aunque el evaluador corra de nuevo
+sobre la misma alerta.
+
 Contrato de payloads: ver [`../agent/src/protocol.c`](../agent/src/protocol.c)
 (serializador del agent) y [`../docs/adr/0003-collector-ingestion.md`]
 (../docs/adr/0003-collector-ingestion.md) para las decisiones de diseno.
@@ -91,6 +132,9 @@ Contrato de payloads: ver [`../agent/src/protocol.c`](../agent/src/protocol.c)
 | `OBS_STATE_ONLINE_SECS` | `15` | antiguedad de `last_seen` para ONLINE (bloque 4.2) |
 | `OBS_STATE_DEGRADED_SECS` | `60` | antiguedad de `last_seen` para DEGRADED (bloque 4.2) |
 | `OBS_REBOOT_MIN_UPTIME_DROP_SECS` | `2.0` | caida minima de uptime para considerar reboot (bloque 4.3) |
+| `OBS_ALERT_EVAL_INTERVAL_SECS` | `15` | periodo del evaluador de alertas (bloque 5.1) |
+| `OBS_ALERT_LOOKBACK_SECS` | `300` | ventana de muestras que el evaluador consulta por regla (bloque 5.1) |
+| `OBS_ALERT_RESOLVE_GRACE_SECS` | `60` | ventana de hysteresis de una alerta FIRING (bloque 5.2); 0 = resolucion inmediata, no puede ser negativa |
 | `RUST_LOG` | `info` | nivel de log (tracing) |
 
 ## Build y tests
@@ -98,7 +142,7 @@ Contrato de payloads: ver [`../agent/src/protocol.c`](../agent/src/protocol.c)
 ```sh
 cargo build            # debug
 cargo build --release  # release (LTO + codegen-units=1)
-cargo test             # 48 tests unitarios (sin DB)
+cargo test             # 87 tests unitarios (sin DB)
 cargo clippy           # lint, sin warnings
 cargo fmt              # formato
 ```
@@ -136,6 +180,16 @@ agent_token = tu-token
   mountpoint.
 - `reboot_events` — una fila por reboot detectado (bloque 4.3):
   `detected_at`, `sample_ts`, `uptime_before`, `uptime_after`.
+- `alert_rules` — reglas declarativas (Fase 5): `name` UNIQUE,
+  `metric_name`, `entity`, `op`, `threshold`, `for_secs` (default 0),
+  `enabled`.
+- `alerts` — estado **actual** de una alerta activa, deduplicado por PK
+  `(rule_id, agent_id)`: `state` (`pending|firing`), `since`, opcional
+  `resolve_from` (ventana de hysteresis en curso). INACTIVE = ausencia
+  de fila; RESOLVED = borrado al resolver.
+- `alert_events` — historial de transiciones (bloque 5.3): una fila por
+  transicion real (`from_state`/`to_state`/`ts`); FK a `alert_rules`
+  con ON DELETE CASCADE.
 
 ## Limites de cardinalidad
 
@@ -145,11 +199,5 @@ entradas -> `400 too_many_entities`; el objeto `metrics` con mas de
 1024 claves -> `400 too_many_metrics` (el agent emite ~14). Los valores
 no finitos (NaN/Inf) no pueden llegar a la DB: `serde_json` los rechaza
 a nivel de parsing (`400 invalid_json`).
-
-## Proximos pasos (Fase 5)
-
-- Alert engine: reglas declarativas, maquina de estados
-  INACTIVE->PENDING->FIRING->RESOLVED, hysteresis, deduplicacion,
-  historial.
 
 Ver [`../PHASES.md`](../PHASES.md).

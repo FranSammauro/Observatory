@@ -1,8 +1,10 @@
 use chrono::{DateTime, TimeZone, Utc};
 use serde::Deserialize;
+use uuid::Uuid;
 
 use crate::config::{
-    DEFAULT_REBOOTS_LIMIT, DEFAULT_SERIES_POINTS, MAX_REBOOTS_LIMIT, MAX_SERIES_POINTS,
+    DEFAULT_ALERT_HISTORY_LIMIT, DEFAULT_REBOOTS_LIMIT, DEFAULT_SERIES_POINTS,
+    MAX_ALERT_HISTORY_LIMIT, MAX_REBOOTS_LIMIT, MAX_SERIES_POINTS,
 };
 use crate::error::ApiError;
 
@@ -103,6 +105,109 @@ pub struct RebootsQuery {
 impl RebootsQuery {
     pub fn into_limit(self) -> Result<i64, ApiError> {
         parse_limit(self.limit, DEFAULT_REBOOTS_LIMIT, MAX_REBOOTS_LIMIT)
+    }
+}
+
+/*
+ * Query API de alertas (Fase 5, bloque 5.3):
+ *   - `GET /api/v1/alerts`            -> alertas activas (pending/firing).
+ *   - `GET /api/v1/alerts/history`    -> historial de transiciones.
+ * Mismo bearer token que el resto; las reglas de validacion estan aca,
+ * puras y testeables sin DB.
+ */
+
+fn parse_agent_uuid(raw: &str) -> Result<Uuid, ApiError> {
+    Uuid::parse_str(raw.trim())
+        .map_err(|_| ApiError::bad_request("invalid_agent_id", "agent_id no es un UUID valido"))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AlertsQuery {
+    pub agent_id: Option<String>,
+    pub state: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct AlertsFilter {
+    pub agent_id: Option<Uuid>,
+    pub state: Option<String>,
+}
+
+impl AlertsQuery {
+    pub fn into_filter(self) -> Result<AlertsFilter, ApiError> {
+        let agent_id = self.agent_id.map(|s| parse_agent_uuid(&s)).transpose()?;
+
+        let state = match self.state {
+            Some(s) if s.trim().is_empty() || !matches!(s.trim(), "pending" | "firing") => {
+                return Err(ApiError::bad_request(
+                    "invalid_alert_state",
+                    "state debe ser pending o firing",
+                ));
+            }
+            Some(s) => Some(s.trim().to_string()),
+            None => None,
+        };
+
+        Ok(AlertsFilter { agent_id, state })
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct HistoryQuery {
+    pub agent_id: Option<String>,
+    pub rule_id: Option<i64>,
+    pub from: Option<i64>,
+    pub to: Option<i64>,
+    pub limit: Option<i64>,
+}
+
+#[derive(Debug, Clone)]
+pub struct HistoryFilter {
+    pub agent_id: Option<Uuid>,
+    pub rule_id: Option<i64>,
+    pub from: Option<DateTime<Utc>>,
+    pub to: Option<DateTime<Utc>>,
+    pub limit: i64,
+}
+
+impl HistoryQuery {
+    pub fn into_filter(self) -> Result<HistoryFilter, ApiError> {
+        let agent_id = self.agent_id.map(|s| parse_agent_uuid(&s)).transpose()?;
+
+        let from = self.from.map(|ts| unix_to_utc(ts, "from")).transpose()?;
+        let to = self.to.map(|ts| unix_to_utc(ts, "to")).transpose()?;
+
+        if let (Some(start), Some(end)) = (from, to) {
+            if start > end {
+                return Err(ApiError::bad_request(
+                    "invalid_time_range",
+                    "from no puede ser posterior a to",
+                ));
+            }
+        }
+
+        if let Some(rule_id) = self.rule_id {
+            if rule_id < 1 {
+                return Err(ApiError::bad_request(
+                    "invalid_rule_id",
+                    "rule_id debe ser un entero positivo",
+                ));
+            }
+        }
+
+        let limit = parse_limit(
+            self.limit,
+            DEFAULT_ALERT_HISTORY_LIMIT,
+            MAX_ALERT_HISTORY_LIMIT,
+        )?;
+
+        Ok(HistoryFilter {
+            agent_id,
+            rule_id: self.rule_id,
+            from,
+            to,
+            limit,
+        })
     }
 }
 
@@ -231,5 +336,125 @@ mod tests {
     #[test]
     fn parse_limit_rejects_zero() {
         assert!(parse_limit(Some(0), DEFAULT_REBOOTS_LIMIT, MAX_REBOOTS_LIMIT).is_err());
+    }
+
+    #[test]
+    fn alerts_empty_query_uses_defaults() {
+        let f = AlertsQuery {
+            agent_id: None,
+            state: None,
+        }
+        .into_filter()
+        .unwrap();
+        assert_eq!(f.agent_id, None);
+        assert_eq!(f.state, None);
+    }
+
+    #[test]
+    fn alerts_state_is_validated_and_trimmed() {
+        let f = AlertsQuery {
+            agent_id: None,
+            state: Some("  firing  ".into()),
+        }
+        .into_filter()
+        .unwrap();
+        assert_eq!(f.state.as_deref(), Some("firing"));
+    }
+
+    #[test]
+    fn alerts_state_is_rejected() {
+        let r = AlertsQuery {
+            agent_id: None,
+            state: Some("resolved".into()),
+        }
+        .into_filter();
+        assert!(r.is_err());
+        assert_eq!(r.unwrap_err().code, "invalid_alert_state");
+    }
+
+    #[test]
+    fn alerts_empty_state_is_rejected() {
+        let r = AlertsQuery {
+            agent_id: None,
+            state: Some("   ".into()),
+        }
+        .into_filter();
+        assert!(r.is_err());
+    }
+
+    #[test]
+    fn alerts_invalid_agent_id_is_rejected() {
+        let r = AlertsQuery {
+            agent_id: Some("not-a-uuid".into()),
+            state: None,
+        }
+        .into_filter();
+        assert_eq!(r.unwrap_err().code, "invalid_agent_id");
+    }
+
+    #[test]
+    fn alerts_valid_agent_id_is_parsed() {
+        let f = AlertsQuery {
+            agent_id: Some("bca99f71-8eaa-f6f1-55b2-14a92fdd309f".into()),
+            state: None,
+        }
+        .into_filter()
+        .unwrap();
+        assert!(f.agent_id.is_some());
+    }
+
+    #[test]
+    fn history_defaults() {
+        let f = HistoryQuery {
+            agent_id: None,
+            rule_id: None,
+            from: None,
+            to: None,
+            limit: None,
+        }
+        .into_filter()
+        .unwrap();
+        assert_eq!(f.limit, DEFAULT_ALERT_HISTORY_LIMIT);
+        assert!(f.from.is_none() && f.to.is_none() && f.agent_id.is_none());
+    }
+
+    #[test]
+    fn history_from_after_to_is_rejected() {
+        let r = HistoryQuery {
+            agent_id: None,
+            rule_id: None,
+            from: Some(200),
+            to: Some(100),
+            limit: None,
+        }
+        .into_filter();
+        assert!(r.is_err());
+    }
+
+    #[test]
+    fn history_zero_rule_id_is_rejected() {
+        let r = HistoryQuery {
+            agent_id: None,
+            rule_id: Some(0),
+            from: None,
+            to: None,
+            limit: None,
+        }
+        .into_filter();
+        assert_eq!(r.unwrap_err().code, "invalid_rule_id");
+    }
+
+    #[test]
+    fn history_limit_clamped_to_default() {
+        let f = HistoryQuery {
+            agent_id: None,
+            rule_id: None,
+            from: None,
+            to: None,
+            limit: Some(MAX_ALERT_HISTORY_LIMIT),
+        }
+        .into_filter()
+        .unwrap();
+        assert_eq!(f.limit, MAX_ALERT_HISTORY_LIMIT);
     }
 }

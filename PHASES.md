@@ -26,8 +26,8 @@ desarrollo con commits progresivos.
       INACTIVE→PENDING→FIRING→RESOLVED, hysteresis, deduplicación,
       historial. Subdividida en 3 bloques: **5.1** reglas declarativas y
       evaluador (entregado), **5.2** máquina de estados + hysteresis
-      (entregado), **5.3** deduplicación + historial + query API. Ver
-      detalle abajo.
+      (entregado), **5.3** deduplicación + historial + query API
+      (entregado). Ver detalle abajo.
 - [ ] **Fase 6 — Health checks + WebSocket**
       Checks HTTP/TCP, eventos realtime.
 - [ ] **Fase 7 — Dashboard**
@@ -353,13 +353,35 @@ desarrollo con commits progresivos.
     `src/config.rs`: `OBS_ALERT_RESOLVE_GRACE_SECS`.
   - 15 tests unitarios nuevos (12 `next_step` + 3 config; 77 en total).
 
-- **Bloque 5.3 — Deduplicacion + historial + query API (pendiente):**
+- **Bloque 5.3 — Deduplicacion + historial + query API (entregado):**
   - Migracion `0005_alert_events.sql`: historial de transiciones
-    (timeline reusable por el dashboard).
-  - Deduplicacion: una sola alerta activa por (rule, agent); transiciones
-    idempotentes (no re-disparar ni duplicar eventos).
-  - Query API: `GET /api/v1/alerts` (activas y resueltas) e historial,
-    con el mismo bearer token y validaciones de parametros.
+    (timeline reusable por el dashboard). Una fila por transicion REAL de
+    la maquina: `from_state` (NULL = desde INACTIVE), `to_state`
+    (`pending|firing|resolved`) y `ts` (hora de arribo del ciclo).
+    FK a `alert_rules` con ON DELETE CASCADE; indices por (agent, ts) y
+    (rule, ts).
+  - Deduplicacion: una sola alerta activa por (rule, agent) via la PK de
+    `alerts`, y transiciones idempotentes — los eventos se escriben en la
+    MISMA transaccion que aplica el estado y solo cuando la maquina
+    cambia de estado (los pasos Stay*/StartResolving no emiten),
+    por lo que re-evaluar una alerta ya transicionada no vuelve a emitir
+    nada. En el evaluador, `AlertOp` lleva el `Event` a insertar; en la
+    DB, `apply_alert_steps` lo persiste junto al UPSERT/DELETE del
+    estado: atomicidad garantizada.
+  - Query API (`src/query.rs`, `src/db.rs`, `src/routes.rs`) — mismo
+    bearer token y validacion pura en parametros:
+    - `GET /api/v1/alerts` — alertas activas (pending/firing) con
+      contexto de la regla (`rule_name`, `metric_name`, `entity`, `op`,
+      `threshold`) y el estado (`since`, `resolve_from`, `checked_at`).
+      Filtros opcionales `agent_id` (UUID valido, `400 invalid_agent_id`)
+      y `state` (`pending|firing`, `400 invalid_alert_state`).
+    - `GET /api/v1/alerts/history` — historial desc por `ts`: `{id,
+      rule_id, rule_name, agent_id, from_state, to_state, ts}`. Filtros
+      opcionales `agent_id`, `rule_id` (positivo), `from`/`to` epoch
+      (`from <= to`) y `limit` (`DEFAULT_ALERT_HISTORY_LIMIT=50`,
+      tope `MAX_ALERT_HISTORY_LIMIT=1000`, `400 invalid_limit`).
+  - 10 tests unitarios nuevos (parsing/validacion de `AlertsQuery` y
+    `HistoryQuery`); 87 en total.
 
 **Validado en este entorno (bloques 5.1 + 5.2):**
 
@@ -387,3 +409,31 @@ desarrollo con commits progresivos.
     extiende el tramo a 50s -> `alerta firing (pending -> firing)`.
   - Deduplicacion por (rule_id, agent_id): una fila por regla+agent en
     todo el recorrido.
+
+**Validado en este entorno (bloque 5.3):**
+
+- Mismo ambiente (interval 3s, grace 15s), reglas recreadas tras el
+  recorrido completo de 5.1/5.2:
+  - Cambio de hook de API: `GET /api/v1/alerts` y
+    `GET /api/v1/alerts/history` sobre el ciclo en vivo. Activas con
+    contexto de regla y `since`/`resolve_from` correctos
+    (`cpu-alta` FIRING directo con tramo 40s > for 30; `cpu-lenta`
+    PENDING con tramo 40s < for 300).
+  - Idempotencia: tras 3 ciclos de Stay*, `alert_events` sigue en 2
+    (los Stay* / StartResolving no emiten eventos).
+  - Filtros: `?state=firing` -> 1, `?state=pending` -> 1,
+    `?agent_id=<uuid>` -> 2; `state=resolved` -> 400
+    `invalid_alert_state`; `history?rule_id=4` y `?from`/`?to`/
+    `?limit=2` ok; `from>to` -> 400; sin token -> 401.
+  - PENDING->FIRING en vivo con `temp-alta` (for 20) sobre metrica
+    limpia: sample aislado -> `NULL->pending`; tramo extendido ->
+    `pending->firing`; ambos como eventos de `alert_events`.
+  - Hysteresis en el historial: valor bueno -> `cpu-lenta` resuelve al
+    instante (`pending->resolved`) mientras `cpu-alta` marca
+    `resolve_from` y sigue FIRING, y solo -> `firing->resolved` tras
+    vencer la gracia. `temp-alta` idem.
+  - Timeline final: **7 eventos** (3 creaciones, 1 promocion, 3
+    resoluciones), uno por transicion real y sin duplicados (por regla:
+    2/2/3 eventos, todos `DISTINCT (from_state, to_state)`); `alerts`
+    vacia al final.
+  - 87 tests en verde, build/clippy/fmt limpios.

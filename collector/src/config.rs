@@ -18,6 +18,11 @@ pub const MAX_SERIES_POINTS: i64 = 10_000;
 pub const DEFAULT_REBOOTS_LIMIT: i64 = 50;
 pub const MAX_REBOOTS_LIMIT: i64 = 1_000;
 
+/* Historial de alertas (bloque 5.3): mismo criterio que reboots, son
+ * transiciones de estado (infrecuentes), con margen defensivo. */
+pub const DEFAULT_ALERT_HISTORY_LIMIT: i64 = 50;
+pub const MAX_ALERT_HISTORY_LIMIT: i64 = 1_000;
+
 /* Evaluador de alertas (bloque 5.1): cada cuanto evaluar las reglas y
  * que ventana de `metric_samples` mirar. El intervalo es ~el periodo de
  * metricas del agent (10s); 15s da 1.5 evaluaciones por muestra. El

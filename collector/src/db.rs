@@ -480,6 +480,7 @@ pub async fn apply_alert_steps(pool: &PgPool, ops: &[AlertOp]) -> Result<(), sql
                 agent_id,
                 state,
                 since,
+                event,
             } => {
                 sqlx::query(
                     "INSERT INTO alerts (rule_id, agent_id, state, since, checked_at)
@@ -496,6 +497,18 @@ pub async fn apply_alert_steps(pool: &PgPool, ops: &[AlertOp]) -> Result<(), sql
                 .bind(since)
                 .execute(&mut *tx)
                 .await?;
+                if let Some(ev) = event {
+                    sqlx::query(
+                        "INSERT INTO alert_events (rule_id, agent_id, from_state, to_state, ts)
+                         VALUES ($1, $2, $3, $4, now())",
+                    )
+                    .bind(rule_id)
+                    .bind(agent_id)
+                    .bind(ev.from.map(|s| s.as_str()))
+                    .bind(ev.to.as_str())
+                    .execute(&mut *tx)
+                    .await?;
+                }
             }
             AlertOp::StartResolving { rule_id, agent_id } => {
                 sqlx::query(
@@ -507,15 +520,115 @@ pub async fn apply_alert_steps(pool: &PgPool, ops: &[AlertOp]) -> Result<(), sql
                 .execute(&mut *tx)
                 .await?;
             }
-            AlertOp::Resolved { rule_id, agent_id } => {
+            AlertOp::Resolved {
+                rule_id,
+                agent_id,
+                event,
+            } => {
                 sqlx::query("DELETE FROM alerts WHERE rule_id = $1 AND agent_id = $2")
                     .bind(rule_id)
                     .bind(agent_id)
                     .execute(&mut *tx)
                     .await?;
+                sqlx::query(
+                    "INSERT INTO alert_events (rule_id, agent_id, from_state, to_state, ts)
+                     VALUES ($1, $2, $3, $4, now())",
+                )
+                .bind(rule_id)
+                .bind(agent_id)
+                .bind(event.from.map(|s| s.as_str()))
+                .bind(event.to.as_str())
+                .execute(&mut *tx)
+                .await?;
             }
         }
     }
     tx.commit().await?;
     Ok(())
+}
+
+/*
+ * Query API (bloque 5.3): alertas activas (pending/firing) con contexto
+ * de la regla, filtrables por agent y estado.
+ */
+
+#[derive(Serialize, FromRow)]
+pub struct ActiveAlert {
+    pub rule_id: i64,
+    pub rule_name: String,
+    pub metric_name: String,
+    pub entity: Option<String>,
+    pub op: String,
+    pub threshold: f64,
+    pub agent_id: Uuid,
+    pub state: String,
+    pub since: DateTime<Utc>,
+    pub resolve_from: Option<DateTime<Utc>>,
+    pub checked_at: DateTime<Utc>,
+}
+
+pub async fn list_active_alerts(
+    pool: &PgPool,
+    agent_id: Option<Uuid>,
+    state: Option<&str>,
+) -> Result<Vec<ActiveAlert>, sqlx::Error> {
+    sqlx::query_as::<_, ActiveAlert>(
+        "SELECT r.id AS rule_id, r.name AS rule_name, r.metric_name, r.entity,
+                r.op, r.threshold, a.agent_id, a.state, a.since, a.resolve_from,
+                a.checked_at
+         FROM alerts a
+         JOIN alert_rules r ON r.id = a.rule_id
+         WHERE ($1::uuid IS NULL OR a.agent_id = $1)
+           AND ($2::text IS NULL OR a.state = $2)
+         ORDER BY a.state, a.since DESC",
+    )
+    .bind(agent_id)
+    .bind(state)
+    .fetch_all(pool)
+    .await
+}
+
+/*
+ * Query API (bloque 5.3): historial de transiciones en `alert_events`
+ * ("activas y resueltas"): filtrable por agent, regla y rango de tiempo.
+ */
+
+#[derive(Serialize, FromRow)]
+pub struct AlertEventRow {
+    pub id: i64,
+    pub rule_id: i64,
+    pub rule_name: String,
+    pub agent_id: Uuid,
+    pub from_state: Option<String>,
+    pub to_state: String,
+    pub ts: DateTime<Utc>,
+}
+
+pub async fn list_alert_history(
+    pool: &PgPool,
+    agent_id: Option<Uuid>,
+    rule_id: Option<i64>,
+    from: Option<DateTime<Utc>>,
+    to: Option<DateTime<Utc>>,
+    limit: i64,
+) -> Result<Vec<AlertEventRow>, sqlx::Error> {
+    sqlx::query_as::<_, AlertEventRow>(
+        "SELECT e.id, e.rule_id, r.name AS rule_name, e.agent_id,
+                e.from_state, e.to_state, e.ts
+         FROM alert_events e
+         JOIN alert_rules r ON r.id = e.rule_id
+         WHERE ($1::uuid IS NULL OR e.agent_id = $1)
+           AND ($2::bigint IS NULL OR e.rule_id = $2)
+           AND ($3::timestamptz IS NULL OR e.ts >= $3)
+           AND ($4::timestamptz IS NULL OR e.ts <= $4)
+         ORDER BY e.ts DESC, e.id DESC
+         LIMIT $5",
+    )
+    .bind(agent_id)
+    .bind(rule_id)
+    .bind(from)
+    .bind(to)
+    .bind(limit)
+    .fetch_all(pool)
+    .await
 }
