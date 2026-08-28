@@ -4,10 +4,10 @@ Collector central en **Rust (Axum)** que recibe los payloads que emite el
 agent C (`observer-agent`), los valida, los autentica por bearer token, y
 los persiste en PostgreSQL.
 
-> Estado actual: **Fase 4** (en curso) — query API de lectura (bloque 4.1)
-> entregado: endpoints GET de agentes/series. Pendiente de la Fase 4: la
-> maquina de estados ONLINE/DEGRADED/OFFLINE y la deteccion de reboot
-> (bloques 4.2/4.3, ver [`../PHASES.md`](../PHASES.md)).
+> Estado actual: **Fase 4** (en curso) — bloques 4.1 (query API de lectura)
+> y 4.2 (maquina de estados de conectividad) entregados. Pendiente de la
+> Fase 4: la deteccion de reboot (bloque 4.3, ver
+> [`../PHASES.md`](../PHASES.md)).
 
 ## Arquitectura
 
@@ -27,10 +27,14 @@ Ingestion (Fase 3):
 - `POST /api/v1/metrics` — sample completo de metricas del agent.
 - `POST /api/v1/agents/heartbeat` — heartbeat liviano (mas frecuente).
 
-Query API (Fase 4, bloque 4.1) — de solo lectura, mismo bearer token:
+Query API (Fase 4, bloques 4.1 y 4.2) — de solo lectura, mismo bearer
+token:
 
-- `GET /api/v1/agents` — agentes registrados (`first_seen`, `last_seen`),
-  ordenados por actividad descendente.
+- `GET /api/v1/agents` — agentes registrados con **estado de
+  conectividad derivado** (bloque 4.2): `state` `online|degraded|offline`
+  y `last_seen_age_secs`, ordenados por actividad descendente.
+- `GET /api/v1/agents/{agent_id}` — detalle de un agente (mismo formato;
+  `404 unknown_agent` si no está registrado).
 - `GET /api/v1/agents/{agent_id}/metrics` — series del agente: por
   `(metric_name, entity)`, con conteo de muestras, rango temporal y el
   ultimo valor (para la vista "host" del dashboard sin pedir la serie).
@@ -43,6 +47,11 @@ Query API (Fase 4, bloque 4.1) — de solo lectura, mismo bearer token:
   - `limit` — maximo de puntos (default 1000, tope 10000).
   - Respuesta: `{agent_id, metric, entity, from, to, count, points[]}`
     con `points` de `{ts, value}` ordenados ascendentemente.
+
+Estado de conectividad: se **deriva** de `agents.last_seen` (hora de
+arribo, ADR-0003), no se persiste. Con `OBS_STATE_ONLINE_SECS` y
+`OBS_STATE_DEGRADED_SECS` (default 15s y 60s, base heartbeat 5s):
+`age <= online` -> ONLINE, `age <= degraded` -> DEGRADED, sino OFFLINE.
 
 Infra:
 
@@ -68,6 +77,8 @@ Contrato de payloads: ver [`../agent/src/protocol.c`](../agent/src/protocol.c)
 | `OBS_INGEST_FUTURE_SKEW_SECS` | `60` | timestamps futuros tolerados |
 | `OBS_INGEST_MAX_AGE_SECS` | `600` | antiguedad maxima aceptada de un sample |
 | `OBS_MAX_BODY_BYTES` | `262144` | limite de body (el agent manda <= 16 KB) |
+| `OBS_STATE_ONLINE_SECS` | `15` | antiguedad de `last_seen` para ONLINE (bloque 4.2) |
+| `OBS_STATE_DEGRADED_SECS` | `60` | antiguedad de `last_seen` para DEGRADED (bloque 4.2) |
 | `RUST_LOG` | `info` | nivel de log (tracing) |
 
 ## Build y tests
@@ -75,7 +86,7 @@ Contrato de payloads: ver [`../agent/src/protocol.c`](../agent/src/protocol.c)
 ```sh
 cargo build            # debug
 cargo build --release  # release (LTO + codegen-units=1)
-cargo test             # 25 tests unitarios (sin DB)
+cargo test             # 35 tests unitarios (sin DB)
 cargo clippy           # lint, sin warnings
 cargo fmt              # formato
 ```
@@ -121,10 +132,8 @@ entradas -> `400 too_many_entities`; el objeto `metrics` con mas de
 no finitos (NaN/Inf) no pueden llegar a la DB: `serde_json` los rechaza
 a nivel de parsing (`400 invalid_json`).
 
-## Proximos pasos (Fase 4, bloques pendientes)
+## Proximos pasos (Fase 4, bloque pendiente)
 
-- Maquina de estados ONLINE/DEGRADED/OFFLINE derivada de `last_seen`
-  (bloque 4.2).
 - Deteccion de reboot (uptime decreciente entre muestras) (bloque 4.3).
 
 Ver [`../PHASES.md`](../PHASES.md).

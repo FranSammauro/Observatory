@@ -5,6 +5,7 @@ mod error;
 mod models;
 mod query;
 mod routes;
+mod state;
 mod validation;
 
 use std::sync::Arc;

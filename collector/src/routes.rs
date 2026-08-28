@@ -9,6 +9,7 @@ use axum::{
     routing::{get, post},
     Router,
 };
+use chrono::{DateTime, Utc};
 use serde_json::json;
 use sqlx::PgPool;
 
@@ -18,6 +19,7 @@ use crate::db;
 use crate::error::ApiError;
 use crate::models::{HeartbeatPayload, MetricsPayload, Validate};
 use crate::query::SeriesQuery;
+use crate::state::{connectivity_state, StateLimits};
 use crate::validation::{utc_from_unix_ts, TimeLimits};
 
 #[derive(Clone)]
@@ -34,6 +36,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/v1/agents/heartbeat", post(heartbeat_handler))
         .route("/api/v1/metrics", post(metrics_handler))
         .route("/api/v1/agents", get(agents_list_handler))
+        .route("/api/v1/agents/{agent_id}", get(agent_detail_handler))
         .route(
             "/api/v1/agents/{agent_id}/metrics",
             get(agent_metrics_handler),
@@ -125,8 +128,48 @@ async fn agents_list_handler(
     check_bearer(&headers, &state.config.auth_token)?;
 
     let agents = db::list_agents(&state.pool).await?;
+    let limits = state.config.state_limits();
+    let now = Utc::now();
+
+    let body: Vec<_> = agents.iter().map(|a| agent_json(a, now, &limits)).collect();
+
     tracing::debug!(n = agents.len(), "query: lista de agentes");
-    Ok(Json(json!({"agents": agents, "count": agents.len()})))
+    Ok(Json(json!({"agents": body, "count": body.len()})))
+}
+
+async fn agent_detail_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(agent_id): Path<String>,
+) -> Result<impl IntoResponse> {
+    check_bearer(&headers, &state.config.auth_token)?;
+
+    let agent_id = parse_agent_uuid(&agent_id)?;
+    let agent = db::get_agent(&state.pool, &agent_id)
+        .await?
+        .ok_or_else(|| ApiError::not_found("unknown_agent", "agent no registrado"))?;
+
+    let limits = state.config.state_limits();
+    let body = agent_json(&agent, Utc::now(), &limits);
+    let state = body["state"].as_str().unwrap_or("?");
+    tracing::debug!(%agent_id, state, "query: detalle de agente");
+    Ok(Json(body))
+}
+
+/*
+ * Serializa un agente con su estado de conectividad derivado (bloque 4.2).
+ * El estado es funcion pura de la antiguedad de `last_seen`, calculado al
+ * leer, no persistido.
+ */
+fn agent_json(agent: &db::AgentRow, now: DateTime<Utc>, limits: &StateLimits) -> serde_json::Value {
+    let age_secs = now.signed_duration_since(agent.last_seen).num_seconds();
+    json!({
+        "agent_id": agent.agent_id,
+        "first_seen": agent.first_seen,
+        "last_seen": agent.last_seen,
+        "last_seen_age_secs": age_secs,
+        "state": connectivity_state(agent.last_seen, now, limits).as_str(),
+    })
 }
 
 async fn agent_metrics_handler(
@@ -198,6 +241,13 @@ impl Config {
         TimeLimits {
             future_skew_secs: self.max_future_skew_secs,
             max_past_age_secs: self.max_past_age_secs,
+        }
+    }
+
+    fn state_limits(&self) -> StateLimits {
+        StateLimits {
+            online_secs: self.state_online_secs,
+            degraded_secs: self.state_degraded_secs,
         }
     }
 }

@@ -19,8 +19,8 @@ desarrollo con commits progresivos.
 - [ ] **Fase 4 — Collector: query API + estados de conectividad**
       Endpoints GET, máquina de estados ONLINE/DEGRADED/OFFLINE, detección
       de reboot. Subdividida en 3 bloques: **4.1** query API de lectura
-      (entregado), **4.2** máquina de estados, **4.3** detección de
-      reboot. Ver detalle abajo.
+      (entregado), **4.2** máquina de estados (entregado), **4.3**
+      detección de reboot (pendiente). Ver detalle abajo.
 - [ ] **Fase 5 — Alert engine**
       Reglas declarativas, máquina de estados
       INACTIVE→PENDING→FIRING→RESOLVED, hysteresis, deduplicación,
@@ -205,10 +205,21 @@ desarrollo con commits progresivos.
   - `src/db.rs`: `list_agents`, `list_agent_series`, `query_series`.
   - 8 tests unitarios nuevos en `src/query.rs` (25 en total).
 
-- **Bloque 4.2 — Maquina de estados ONLINE/DEGRADED/OFFLINE**
-  (pendiente): derivar el estado de conectividad de `agents.last_seen`
-  (ventanas de degradado/offline configurables) y exponerlo en el query
-  API.
+- **Bloque 4.2 — Maquina de estados ONLINE/DEGRADED/OFFLINE (entregado):**
+  - Estado **derivado** de `agents.last_seen` (hora de arribe, ADR-0003):
+    funcion pura, no se persiste ni hay flujo de transiciones. Regla:
+    `age <= online_secs` -> ONLINE, `age <= degraded_secs` -> DEGRADED,
+    sino OFFLINE. `last_seen` futuro cuenta como ONLINE.
+  - Umbrales configurables: `OBS_STATE_ONLINE_SECS` (default **15s**,
+    ~3 heartbeats de 5s) y `OBS_STATE_DEGRADED_SECS` (default **60s**),
+    validados al arrancar (`degraded >= online`, ninguno negativo — fail
+    fast, filosofia ADR-0002/0003).
+  - Exposicion en el query API: `GET /api/v1/agents` incluye `state` +
+    `last_seen_age_secs`; nuevo `GET /api/v1/agents/{agent_id}` (detalle,
+    `404 unknown_agent` si no existe).
+  - `src/state.rs` (`ConnectivityState`, `connectivity_state()`),
+    `src/db.rs::get_agent`, `ApiError::not_found`.
+  - 10 tests unitarios nuevos (4 de config + 6 de state; 35 en total).
 
 - **Bloque 4.3 — Deteccion de reboot** (pendiente): comparar `system.uptime`
   entre muestras consecutivas de un agent y registrar los reboots.
@@ -216,7 +227,8 @@ desarrollo con commits progresivos.
 **Validado en este entorno:**
 
 - Build limpio (`cargo build`), `cargo clippy` y `cargo fmt` sin
-  hallazgos; 25/25 tests en verde.
+  hallazgos; 25/25 tests en verde (bloque 4.1) y 35/35 tras el bloque
+  4.2.
 - Integración real: postgres de desarrollo + collector + 3 samples
   inyectados por `POST /api/v1/metrics`. Verificado: `GET /api/v1/agents`
   (1 agente, last_seen avanzando), series del agente (7 series con
@@ -227,3 +239,11 @@ desarrollo con commits progresivos.
   `invalid_agent_id`; `from > to` -> 400 `invalid_time_range`; `entity`
   vacia -> 400 `invalid_entity`; `limit=0` -> 400 `invalid_limit`; `from`
   no numerico -> 400 `invalid_query`.
+- Bloque 4.2 validado en este entorno: collector con
+  `OBS_STATE_ONLINE_SECS=10 OBS_STATE_DEGRADED_SECS=30`, 2 heartbeats
+  reales y `last_seen` envejecidos via SQL (20s, 40s, 13min). Estados
+  derivados correctos: `age 13s` -> degraded, `age 25s` -> degraded,
+  `age 45s` -> offline, `age 812s` -> offline. `GET /api/v1/agents/{id}`
+  devuelve el detalle con estado; desconocido -> 404 `unknown_agent`; sin
+  token -> 401. La DB contenía ademas un agente de la prueba del bloque
+  4.1 (13min) correctamente marcado OFFLINE.

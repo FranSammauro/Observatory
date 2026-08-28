@@ -89,7 +89,7 @@ pub async fn insert_metrics(
  * esto en 0001_init.sql (lookup (agent_id, metric_name, entity, ts DESC)).
  */
 
-#[derive(Serialize, FromRow)]
+#[derive(FromRow)]
 pub struct AgentRow {
     pub agent_id: Uuid,
     pub first_seen: DateTime<Utc>,
@@ -105,6 +105,21 @@ pub async fn list_agents(pool: &PgPool) -> Result<Vec<AgentRow>, sqlx::Error> {
     .fetch_all(pool)
     .await?;
     Ok(rows)
+}
+
+/*
+ * Un agente puntual. El estado de conectividad se deriva en el handler
+ * (bloque 4.2) a partir de `last_seen`; aca solo se trae el dato.
+ */
+pub async fn get_agent(pool: &PgPool, agent_id: &Uuid) -> Result<Option<AgentRow>, sqlx::Error> {
+    sqlx::query_as::<_, AgentRow>(
+        "SELECT agent_id, first_seen, last_seen
+         FROM agents
+         WHERE agent_id = $1",
+    )
+    .bind(agent_id)
+    .fetch_optional(pool)
+    .await
 }
 
 #[derive(Serialize, FromRow)]

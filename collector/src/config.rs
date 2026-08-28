@@ -22,6 +22,8 @@ pub struct Config {
     pub max_future_skew_secs: i64,
     pub max_past_age_secs: i64,
     pub max_body_bytes: usize,
+    pub state_online_secs: i64,
+    pub state_degraded_secs: i64,
 }
 
 fn parse_u32(name: &str, default: u32) -> Result<u32, String> {
@@ -60,6 +62,10 @@ impl Config {
         let max_future_skew_secs = parse_i64("OBS_INGEST_FUTURE_SKEW_SECS", 60)?;
         let max_past_age_secs = parse_i64("OBS_INGEST_MAX_AGE_SECS", 600)?;
         let max_body_bytes = parse_u32("OBS_MAX_BODY_BYTES", 256 * 1024)? as usize;
+        let state_online_secs = parse_i64("OBS_STATE_ONLINE_SECS", 15)?;
+        let state_degraded_secs = parse_i64("OBS_STATE_DEGRADED_SECS", 60)?;
+
+        validate_state_limits(state_online_secs, state_degraded_secs)?;
 
         Ok(Self {
             listen_addr,
@@ -69,6 +75,50 @@ impl Config {
             max_future_skew_secs,
             max_past_age_secs,
             max_body_bytes,
+            state_online_secs,
+            state_degraded_secs,
         })
+    }
+}
+
+/*
+ * Umbrales de la maquina de estados (bloque 4.2): online_secs <=
+ * degraded_secs y ninguno negativo. Falla ruidoso al arrancar, igual que
+ * el resto de la validacion de config (filosofia ADR-0002/0003).
+ */
+pub fn validate_state_limits(online_secs: i64, degraded_secs: i64) -> Result<(), String> {
+    if online_secs < 0 {
+        return Err("OBS_STATE_ONLINE_SECS no puede ser negativo".to_string());
+    }
+    if degraded_secs < online_secs {
+        return Err(
+            "OBS_STATE_DEGRADED_SECS debe ser mayor o igual que OBS_STATE_ONLINE_SECS".to_string(),
+        );
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn state_limits_accept_sane_values() {
+        assert!(validate_state_limits(15, 60).is_ok());
+    }
+
+    #[test]
+    fn state_limits_reject_negative_online() {
+        assert!(validate_state_limits(-1, 60).is_err());
+    }
+
+    #[test]
+    fn state_limits_reject_degraded_below_online() {
+        assert!(validate_state_limits(60, 59).is_err());
+    }
+
+    #[test]
+    fn state_limits_equal_is_valid() {
+        assert!(validate_state_limits(15, 15).is_ok());
     }
 }
