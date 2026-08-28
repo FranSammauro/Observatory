@@ -5,8 +5,9 @@ agent/tests/test_cpu
 agent/tests/test_memory
 agent/tests/test_config
 
-# Collector (Rust) - preparado para cuando exista collector/
+# Collector (Rust)
 collector/target/
+collector/.env
 
 # Dashboard - preparado para cuando exista dashboard/
 dashboard/node_modules/

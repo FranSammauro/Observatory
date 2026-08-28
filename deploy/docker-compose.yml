@@ -1,0 +1,35 @@
+# Infraestructura de desarrollo de la Fase 3.
+#
+# Levanta solo PostgreSQL para correr el Collector en local via cargo.
+# El Collector (binario Rust) se compila/ejecuta fuera del contenedor:
+#   cd collector && cargo run
+# con DATABASE_URL="postgres://observer:observer@127.0.0.1:55432/observer"
+#
+# Uso:
+#   docker compose -f deploy/docker-compose.yml up -d
+#   docker compose -f deploy/docker-compose.yml down
+#
+# NOTA: no es el despliegue de produccion del Collector (eso corresponde a
+# Fase 8 - hardening y deploys reproducibles). Es la DB de desarrollo.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: observer-postgres
+    environment:
+      POSTGRES_USER: observer
+      POSTGRES_PASSWORD: observer
+      POSTGRES_DB: observer
+    ports:
+      # Puerto no estandar para no chocar con un postgres local.
+      - "55432:5432"
+    volumes:
+      - observer-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U observer -d observer"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+
+volumes:
+  observer-pgdata:

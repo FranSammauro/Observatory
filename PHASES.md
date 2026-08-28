@@ -12,10 +12,10 @@ desarrollo con commits progresivos.
       Disk, network, filesystem, uptime, process count, temperatura
       opcional, `transport.c` (HTTP client con timeouts), retry con
       backoff+jitter, heartbeat, identidad persistente del agent.
-- [ ] **Fase 3 — Collector core (Rust)**
+- [x] **Fase 3 — Collector core (Rust)**
       Proyecto Axum, migraciones PostgreSQL (`agents`, `metric_samples`),
       registro de agentes, ingestion con validación, autenticación por
-      bearer token.
+      bearer token. Ver detalle abajo. ADR-0003.
 - [ ] **Fase 4 — Collector: query API + estados de conectividad**
       Endpoints GET, máquina de estados ONLINE/DEGRADED/OFFLINE, detección
       de reboot.
@@ -113,3 +113,70 @@ desarrollo con commits progresivos.
 - Unit de systemd para correr el agent como daemon.
 - Buffer local / spool en disco ante interrupciones prolongadas
   (explícitamente fuera de alcance para V1 según el informe, sección 27).
+
+## Fase 3 — detalle
+
+**Entregado:**
+
+- `collector/` — crate Rust (Axum 0.8 + sqlx/tokio/serde, sin ninguna
+  otra dependencia de aplicacion).
+- `collector/migrations/0001_init.sql` — `agents` (id UUID 128-bit,
+  first_seen, last_seen) y `metric_samples` (una fila por
+  agent+timestamp+metrica, con `entity` NULL para escalares y
+  device/mountpoint/interface para las metricas por-entidad).
+  Migraciones embebidas (`sqlx::migrate!`) aplicadas al arrancar.
+- Endpoints: `POST /api/v1/metrics`, `POST /api/v1/agents/heartbeat`,
+  `GET /healthz`. Implementan el contrato exacto que el agent emite
+  (`agent/src/protocol.c`) sin tocar el agent.
+- Autenticacion `Authorization: Bearer <token>` con token compartido
+  (`OBS_COLLECTOR_TOKEN`, requerido al arrancar — fail-fast), comparacion
+  en tiempo casi-constante.
+- Registro de agentes implicito: el primer payload valido hace
+  `INSERT ... ON CONFLICT` en `agents` (mantiene first_seen, actualiza
+  last_seen).
+- Validacion de ingestion: `protocol_version` (== 1), `agent_id` UUID,
+  ventana temporal (`OBS_INGEST_FUTURE_SKEW_SECS` default 60s /
+  `OBS_INGEST_MAX_AGE_SECS` default 600s), cardinalidad de arrays (max
+  16, igual que los `OBS_MAX_*` del agent) y de claves de `metrics` (max
+  1024), entidades no vacias, body size limit. NaN/Inf rechazados por el
+  parser de JSON.
+- `agents.last_seen` se actualiza con la hora de **arribo** al servidor
+  (no con el timestamp que reporta el agent), para que la liveness de la
+  Fase 4 no dependa del reloj de cada host.
+- Modelo de datos resuelto en `docs/adr/0003-collector-ingestion.md`
+  (las 5 decisiones abiertas de ingestion).
+- `deploy/` — `docker-compose.yml` (Postgres de desarrollo, puerto 55432)
+  y `.env.example`.
+- 17 tests unitarios (auth, parsing/flatten de payloads, validacion
+  temporal, de entidades y de cardinalidad) — sin warnings.
+
+**Validado en este entorno:**
+
+- Build limpio (`cargo build`) y `cargo clippy`/`cargo fmt` sin
+  hallazgos; 16/16 tests en verde.
+- Integración real: postgres local scratch + collector + agent real
+  (`observer-agent 0.2.0-phase2`) corriendo 8s. Verificado en DB: agente
+  registrado (1 fila en `agents`, last_seen avanzando), 399 filas en
+  `metric_samples`, escalares con entity NULL y entidades por-device/
+  mountpoint bien pobladas (disk sda/sdb/sdc, filesystem /, /boot,
+  /home), con el header bearer correcto.
+- Casos negativos por HTTP: sin token / token incorrecto -> 401;
+  protocol_version erroneo -> 400 `unsupported_protocol_version`;
+  timestamp fuera de ventana -> 400 `timestamp_out_of_range`; json
+  malformado -> 400 `invalid_json`; array de >16 entidades -> 400
+  `too_many_entities`; >1024 claves en `metrics` -> 400
+  `too_many_metrics`; body > 256 KB -> 413. NaN y overflow numerico
+  (`1e999`) rechazados por el parser (400) — nunca llegan a la DB.
+- Token desalineado (agent con otro token) -> el agent real recibe 401
+  y entra en backoff 1s/2s/4s sin colgarse.
+- `last_seen` usa hora de arribo: heartbeat con ts 300s atras (dentro de
+  ventana) -> 200 y `last_seen` = ahora del servidor.
+- Shutdown graceful por SIGTERM ("shutdown signal recibido").
+
+**Pendiente para Fases 4+ (no es parte de Fase 3):**
+
+- Query API (endpoints GET de series) y maquina de estados
+  ONLINE/DEGRADED/OFFLINE (Fase 4 — ver ADR-0003, la DB ya mantiene
+  last_seen para derivarla).
+- Deteccion de reboot al comparar uptime entre muestras (Fase 4).
+- Tokens per-agent y TLS (Fase 8).

@@ -27,7 +27,7 @@ Ver [`PHASES.md`](PHASES.md) para el estado del desarrollo por fases, y
 ```
 personal-observability/
 ├── agent/          # Agent en C (ver agent/README.md)
-├── collector/       # Collector en Rust (Fase 3+)
+├── collector/       # Collector en Rust (ver collector/README.md)
 ├── dashboard/        # Dashboard (Fase 7+)
 ├── deploy/           # Docker, systemd, config de Alpine
 ├── docs/
@@ -39,11 +39,19 @@ personal-observability/
 
 ## Estado actual
 
-**Fase 2 completa**: agent en C con todos los collectors del sistema
+**Fases 1–3 completas**: agent en C con todos los collectors del sistema
 (CPU, memoria, disk, network, filesystem, uptime, procesos, temperatura
 opcional), transporte HTTP real sobre sockets POSIX, heartbeat
-independiente, retry con backoff+jitter, e identidad persistente. Ver
-[`agent/README.md`](agent/README.md) para build, uso y tests.
+independiente, retry con backoff+jitter, e identidad persistente — y ya
+el **Collector central en Rust** (Axum) que recibe esos payloads: registro
+implicito de agentes, ingestion con validación, autenticación por bearer
+token y persistencia en PostgreSQL. Ver [`agent/README.md`](agent/README.md)
+y [`collector/README.md`](collector/README.md). Decisiones de ingestion:
+[`docs/adr/0003-collector-ingestion.md`](docs/adr/0003-collector-ingestion.md).
+
+Falta del camino hacia producción: query API + estados de conectividad
+(Fase 4), alert engine (Fase 5), health checks + WebSocket (Fase 6),
+dashboard (Fase 7), y hardening/TLS/benchmark (Fase 8).
 
 TLS todavía no está implementado (queda para la Fase 8 de hardening) —
 ver [`docs/adr/0002-transport-protocol.md`](docs/adr/0002-transport-protocol.md).

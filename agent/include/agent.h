@@ -6,7 +6,7 @@
 #include <stdbool.h>
 
 /* Protocol / build versioning */
-#define AGENT_VERSION      "0.1.0-phase1"
+#define AGENT_VERSION      "0.2.0-phase2"
 #define PROTOCOL_VERSION   1
 
 /* Sizing limits (see docs/adr/0001-agent-language.md — budget-driven design) */
