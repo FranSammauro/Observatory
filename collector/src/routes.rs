@@ -4,15 +4,16 @@ use axum::{
     body::Bytes,
     extract::rejection::QueryRejection,
     extract::{DefaultBodyLimit, Path, Query, State},
-    http::HeaderMap,
+    http::{HeaderMap, StatusCode},
     response::{IntoResponse, Json},
-    routing::{get, post},
+    routing::{delete, get, post},
     Router,
 };
 use chrono::{DateTime, Utc};
 use serde_json::json;
 use sqlx::PgPool;
 
+use crate::alerts::CreateRule;
 use crate::auth::check_bearer;
 use crate::config::Config;
 use crate::db;
@@ -48,6 +49,12 @@ pub fn build_router(state: AppState) -> Router {
         .route(
             "/api/v1/agents/{agent_id}/metrics/{metric}",
             get(metric_series_handler),
+        )
+        .route("/api/v1/alerts/rules", get(list_rules_handler))
+        .route("/api/v1/alerts/rules", post(create_rule_handler))
+        .route(
+            "/api/v1/alerts/rules/{rule_id}",
+            delete(delete_rule_handler),
         )
         .layer(DefaultBodyLimit::max(state.config.max_body_bytes))
         .with_state(state)
@@ -293,6 +300,102 @@ async fn metric_series_handler(
 fn parse_agent_uuid(raw: &str) -> Result<uuid::Uuid> {
     uuid::Uuid::parse_str(raw.trim())
         .map_err(|_| ApiError::bad_request("invalid_agent_id", "agent_id no es un UUID valido"))
+}
+
+/*
+ * Alert engine (Fase 5, bloque 5.1): gestion de reglas declarativas.
+ * El evaluador periodico las lee via db::list_enabled_rules; aca solo se
+ * crean, listan y borran con el mismo bearer token que el resto.
+ */
+
+async fn create_rule_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<impl IntoResponse> {
+    check_bearer(&headers, &state.config.auth_token)?;
+
+    let payload: CreateRule = serde_json::from_slice(&body).map_err(|e| {
+        ApiError::bad_request("invalid_rule", format!("payload de regla invalido: {e}"))
+    })?;
+    let draft = payload.into_draft()?;
+
+    let row = db::create_rule(
+        &state.pool,
+        &draft.name,
+        &draft.metric_name,
+        draft.entity.as_deref(),
+        draft.op.as_str(),
+        draft.threshold,
+        draft.for_secs,
+    )
+    .await
+    .map_err(rule_create_err)?;
+
+    tracing::info!(id = row.id, rule = %row.name, "regla de alerta creada");
+    Ok((StatusCode::CREATED, Json(rule_json(&row))))
+}
+
+async fn list_rules_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<impl IntoResponse> {
+    check_bearer(&headers, &state.config.auth_token)?;
+
+    let rules = db::list_rules(&state.pool).await?;
+    let body: Vec<_> = rules.iter().map(rule_json).collect();
+    tracing::debug!(n = body.len(), "query: reglas de alerta");
+    Ok(Json(json!({"rules": body, "count": body.len()})))
+}
+
+async fn delete_rule_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(rule_id): Path<String>,
+) -> Result<impl IntoResponse> {
+    check_bearer(&headers, &state.config.auth_token)?;
+
+    let rule_id: i64 = rule_id
+        .trim()
+        .parse()
+        .map_err(|_| ApiError::bad_request("invalid_rule_id", "rule_id debe ser un entero"))?;
+
+    if !db::delete_rule(&state.pool, rule_id).await? {
+        return Err(ApiError::not_found("unknown_rule", "regla no encontrada"));
+    }
+
+    tracing::info!(rule_id, "regla de alerta borrada");
+    Ok(Json(json!({"status": "ok"})))
+}
+
+fn rule_json(row: &db::AlertRuleRow) -> serde_json::Value {
+    json!({
+        "id": row.id,
+        "name": row.name,
+        "metric_name": row.metric_name,
+        "entity": row.entity,
+        "op": row.op,
+        "threshold": row.threshold,
+        "for_secs": row.for_secs,
+        "enabled": row.enabled,
+        "created_at": row.created_at,
+    })
+}
+
+/*
+ * "name" tiene UNIQUE en la DB: un duplicado es un 400 explícito, no un
+ * 500. Cualquier otro error sqlx se propaga como internal_error.
+ */
+fn rule_create_err(e: sqlx::Error) -> ApiError {
+    if let sqlx::Error::Database(db) = &e {
+        if db.is_unique_violation() {
+            return ApiError::bad_request(
+                "rule_already_exists",
+                "ya existe una regla con ese nombre",
+            );
+        }
+    }
+    e.into()
 }
 
 impl Config {

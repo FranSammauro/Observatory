@@ -18,6 +18,12 @@ pub const MAX_SERIES_POINTS: i64 = 10_000;
 pub const DEFAULT_REBOOTS_LIMIT: i64 = 50;
 pub const MAX_REBOOTS_LIMIT: i64 = 1_000;
 
+/* Evaluador de alertas (bloque 5.1): cada cuanto evaluar las reglas y
+ * que ventana de `metric_samples` mirar. El intervalo es ~el periodo de
+ * metricas del agent (10s); 15s da 1.5 evaluaciones por muestra. El
+ * lookback de 5 min cubre holgadamente `for_secs` tipicos sin arrastrar
+ * datos muertos. */
+
 #[derive(Debug, Clone)]
 pub struct Config {
     pub listen_addr: String,
@@ -30,6 +36,8 @@ pub struct Config {
     pub state_online_secs: i64,
     pub state_degraded_secs: i64,
     pub reboot_min_uptime_drop_secs: f64,
+    pub alert_eval_interval_secs: i64,
+    pub alert_lookback_secs: i64,
 }
 
 fn parse_u32(name: &str, default: u32) -> Result<u32, String> {
@@ -81,9 +89,12 @@ impl Config {
         let state_online_secs = parse_i64("OBS_STATE_ONLINE_SECS", 15)?;
         let state_degraded_secs = parse_i64("OBS_STATE_DEGRADED_SECS", 60)?;
         let reboot_min_uptime_drop_secs = parse_f64("OBS_REBOOT_MIN_UPTIME_DROP_SECS", 2.0)?;
+        let alert_eval_interval_secs = parse_i64("OBS_ALERT_EVAL_INTERVAL_SECS", 15)?;
+        let alert_lookback_secs = parse_i64("OBS_ALERT_LOOKBACK_SECS", 300)?;
 
         validate_state_limits(state_online_secs, state_degraded_secs)?;
         validate_reboot_drop(reboot_min_uptime_drop_secs)?;
+        validate_alert_limits(alert_eval_interval_secs, alert_lookback_secs)?;
 
         Ok(Self {
             listen_addr,
@@ -96,6 +107,8 @@ impl Config {
             state_online_secs,
             state_degraded_secs,
             reboot_min_uptime_drop_secs,
+            alert_eval_interval_secs,
+            alert_lookback_secs,
         })
     }
 }
@@ -125,6 +138,20 @@ pub fn validate_state_limits(online_secs: i64, degraded_secs: i64) -> Result<(),
         return Err(
             "OBS_STATE_DEGRADED_SECS debe ser mayor o igual que OBS_STATE_ONLINE_SECS".to_string(),
         );
+    }
+    Ok(())
+}
+
+/*
+ * Evaluador de alertas (bloque 5.1): intervalo y ventana deben ser
+ * positivos (un ciclo cada 0s o una ventana vacia no tienen sentido).
+ */
+pub fn validate_alert_limits(interval_secs: i64, lookback_secs: i64) -> Result<(), String> {
+    if interval_secs <= 0 {
+        return Err("OBS_ALERT_EVAL_INTERVAL_SECS debe ser mayor que 0".to_string());
+    }
+    if lookback_secs <= 0 {
+        return Err("OBS_ALERT_LOOKBACK_SECS debe ser mayor que 0".to_string());
     }
     Ok(())
 }
@@ -164,5 +191,18 @@ mod tests {
         assert!(validate_reboot_drop(-1.0).is_err());
         assert!(validate_reboot_drop(f64::NAN).is_err());
         assert!(validate_reboot_drop(f64::INFINITY).is_err());
+    }
+
+    #[test]
+    fn alert_limits_accept_positive_values() {
+        assert!(validate_alert_limits(15, 300).is_ok());
+    }
+
+    #[test]
+    fn alert_limits_reject_zero_and_negative() {
+        assert!(validate_alert_limits(0, 300).is_err());
+        assert!(validate_alert_limits(15, 0).is_err());
+        assert!(validate_alert_limits(-5, 300).is_err());
+        assert!(validate_alert_limits(15, -5).is_err());
     }
 }

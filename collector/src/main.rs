@@ -1,3 +1,4 @@
+mod alerts;
 mod auth;
 mod config;
 mod db;
@@ -60,6 +61,7 @@ async fn main() {
         pool,
         config: Arc::new(config),
     };
+    alerts::spawn_evaluator(state.pool.clone(), Arc::clone(&state.config));
     let app = build_router(state);
 
     tracing::info!("collector listening on {}", listener.local_addr().unwrap());

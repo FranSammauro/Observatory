@@ -333,3 +333,112 @@ pub struct IngestReport {
     pub uptime_before: Option<f64>,
     pub uptime_after: Option<f64>,
 }
+
+/*
+ * Alert engine (Fase 5, bloque 5.1): persistencia de reglas declarativas
+ * y lectura de las series que evalua el evaluador periodico. La maquina
+ * de estados (bloque 5.2) y el historial (bloque 5.3) vienen despues.
+ */
+
+#[derive(FromRow)]
+pub struct AlertRuleRow {
+    pub id: i64,
+    pub name: String,
+    pub metric_name: String,
+    pub entity: Option<String>,
+    pub op: String,
+    pub threshold: f64,
+    pub for_secs: i64,
+    pub enabled: bool,
+    pub created_at: DateTime<Utc>,
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn create_rule(
+    pool: &PgPool,
+    name: &str,
+    metric_name: &str,
+    entity: Option<&str>,
+    op: &str,
+    threshold: f64,
+    for_secs: i64,
+) -> Result<AlertRuleRow, sqlx::Error> {
+    sqlx::query_as::<_, AlertRuleRow>(
+        "INSERT INTO alert_rules (name, metric_name, entity, op, threshold, for_secs)
+         VALUES ($1, $2, $3, $4, $5, $6)
+         RETURNING id, name, metric_name, entity, op, threshold, for_secs, enabled, created_at",
+    )
+    .bind(name)
+    .bind(metric_name)
+    .bind(entity)
+    .bind(op)
+    .bind(threshold)
+    .bind(for_secs)
+    .fetch_one(pool)
+    .await
+}
+
+pub async fn list_rules(pool: &PgPool) -> Result<Vec<AlertRuleRow>, sqlx::Error> {
+    sqlx::query_as::<_, AlertRuleRow>(
+        "SELECT id, name, metric_name, entity, op, threshold, for_secs, enabled, created_at
+         FROM alert_rules
+         ORDER BY id",
+    )
+    .fetch_all(pool)
+    .await
+}
+
+/*
+ * Solo las reglas que el evaluador debe considerar en cada ciclo.
+ */
+pub async fn list_enabled_rules(pool: &PgPool) -> Result<Vec<AlertRuleRow>, sqlx::Error> {
+    sqlx::query_as::<_, AlertRuleRow>(
+        "SELECT id, name, metric_name, entity, op, threshold, for_secs, enabled, created_at
+         FROM alert_rules
+         WHERE enabled
+         ORDER BY id",
+    )
+    .fetch_all(pool)
+    .await
+}
+
+pub async fn delete_rule(pool: &PgPool, rule_id: i64) -> Result<bool, sqlx::Error> {
+    let res = sqlx::query("DELETE FROM alert_rules WHERE id = $1")
+        .bind(rule_id)
+        .execute(pool)
+        .await?;
+    Ok(res.rows_affected() > 0)
+}
+
+#[derive(FromRow)]
+pub struct RecentSample {
+    pub agent_id: Uuid,
+    pub ts: DateTime<Utc>,
+    pub value: f64,
+}
+
+/*
+ * Muestras de la ventana que el evaluador pide por regla: la serie de la
+ * metrica/entidad de la regla desde `from`. Ordenada por (agent_id, ts
+ * ASC) para agrupar por agent en una sola pasada en el evaluador.
+ */
+pub async fn recent_samples_for_rule(
+    pool: &PgPool,
+    metric_name: &str,
+    entity: Option<&str>,
+    from: DateTime<Utc>,
+) -> Result<Vec<RecentSample>, sqlx::Error> {
+    sqlx::query_as::<_, RecentSample>(
+        "SELECT agent_id, ts, value
+         FROM metric_samples
+         WHERE metric_name = $1
+           AND entity IS NOT DISTINCT FROM $2
+           AND ts >= $3
+         ORDER BY agent_id, ts ASC",
+    )
+    .bind(metric_name)
+    .bind(entity)
+    .bind(from)
+    .fetch_all(pool)
+    .await
+}

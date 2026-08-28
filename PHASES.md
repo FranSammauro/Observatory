@@ -24,7 +24,9 @@ desarrollo con commits progresivos.
 - [ ] **Fase 5 — Alert engine**
       Reglas declarativas, máquina de estados
       INACTIVE→PENDING→FIRING→RESOLVED, hysteresis, deduplicación,
-      historial.
+      historial. Subdividida en 3 bloques: **5.1** reglas declarativas y
+      evaluador (entregado), **5.2** máquina de estados + hysteresis,
+      **5.3** deduplicación + historial + query API. Ver detalle abajo.
 - [ ] **Fase 6 — Health checks + WebSocket**
       Checks HTTP/TCP, eventos realtime.
 - [ ] **Fase 7 — Dashboard**
@@ -280,3 +282,58 @@ desarrollo con commits progresivos.
 - Cierre de Fase 4: blocques 4.1, 4.2 y 4.3 validados con postgres real
   (migraciones 0001 + 0002 aplicadas al arranque), build limpio y 48
   tests en verde.
+
+## Fase 5 — detalle
+
+**Subdivision en 3 bloques:**
+
+- **Bloque 5.1 — Reglas declarativas y evaluador (entregado):**
+  - Migracion `0003_alert_rules.sql`: tabla `alert_rules` (regla
+    declarativa: `name` unico, `metric_name`, `entity` opcional — NULL
+    para metricas escalares, label exacto (device/interface/mountpoint)
+    para las por-entidad —, `op` ge/gt/le/lt con CHECK, `threshold`
+    finito, `for_secs` >= 0, `enabled`). `for_secs` lo consume la
+    maquina de estados del bloque 5.2.
+  - `src/alerts.rs`:
+    - `CondOp` + `parse_op` (ge/gt/le/lt) y `evaluate_series` — funcion
+      pura sobre la serie temporal leida de `metric_samples`:
+      `NoData` (sin muestras en la ventana), `NotHolding` (la muestra
+      mas reciente no satisface la condicion) u `Holding { since,
+      holds_for_secs, meets_for }` (se sostiene, desde cuando y si ya
+      alcanzo `for_secs` — la base del PENDING/FIRING de 5.2). Valores
+      no finitos (NaN/Inf) nunca satisfacen la condicion.
+  - Evaluador periodico: task de tokio lanzada en `main.rs` que cada
+    `OBS_ALERT_EVAL_INTERVAL_SECS` (default **15s**) carga las reglas
+    habilitadas, consulta la ventana `OBS_ALERT_LOOKBACK_SECS` (default
+    **300s**) de `metric_samples` por (regla, agent) y loguea cuando una
+    condicion se sostiene. Todavia no transiciona estado ni persiste
+    nada: es el motor que el bloque 5.2 va a consumir.
+  - Gestion de reglas por API (mismo bearer token que el resto):
+    `POST /api/v1/alerts/rules` (201 con la regla creada),
+    `GET /api/v1/alerts/rules`, `DELETE /api/v1/alerts/rules/{id}`
+    (404 `unknown_rule`). Validacion: name no vacio y unico
+    (duplicado -> 400 `rule_already_exists`), metric_name no vacio,
+    entity no vacia si viene, op en {ge,gt,le,lt}, threshold finito,
+    for_secs >= 0.
+  - `src/db.rs`: `create_rule`, `list_rules`, `list_enabled_rules`,
+    `delete_rule`, `recent_samples_for_rule`. `src/config.rs`:
+    `OBS_ALERT_EVAL_INTERVAL_SECS` / `OBS_ALERT_LOOKBACK_SECS`
+    validados positivos al arrancar (fail-fast, filosofia ADR-0002/0003).
+  - Tests unitarios (evaluacion de series + config).
+
+- **Bloque 5.2 — Maquina de estados + hysteresis (pendiente):**
+  - Migracion `0004_alerts.sql`: estado actual persistido por
+    (rule, agent) con transiciones INACTIVE→PENDING→FIRING→RESOLVED en
+    una transaccion, consumiendo `evaluate_series` del bloque 5.1.
+  - Hysteresis: la condicion debe sostenerse `for_secs` para pasar de
+    PENDING a FIRING, y la alerta se resuelve solo cuando la muestra
+    vuelve al lado normal (umbral de salida / ventana de resolucion),
+    para evitar flapping.
+
+- **Bloque 5.3 — Deduplicacion + historial + query API (pendiente):**
+  - Migracion `0005_alert_events.sql`: historial de transiciones
+    (timeline reusable por el dashboard).
+  - Deduplicacion: una sola alerta activa por (rule, agent); transiciones
+    idempotentes (no re-disparar ni duplicar eventos).
+  - Query API: `GET /api/v1/alerts` (activas y resueltas) e historial,
+    con el mismo bearer token y validaciones de parametros.
