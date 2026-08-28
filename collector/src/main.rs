@@ -4,6 +4,7 @@ mod db;
 mod error;
 mod models;
 mod query;
+mod reboot;
 mod routes;
 mod state;
 mod validation;

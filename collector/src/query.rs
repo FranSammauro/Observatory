@@ -1,7 +1,9 @@
 use chrono::{DateTime, TimeZone, Utc};
 use serde::Deserialize;
 
-use crate::config::{DEFAULT_SERIES_POINTS, MAX_SERIES_POINTS};
+use crate::config::{
+    DEFAULT_REBOOTS_LIMIT, DEFAULT_SERIES_POINTS, MAX_REBOOTS_LIMIT, MAX_SERIES_POINTS,
+};
 use crate::error::ApiError;
 
 /*
@@ -42,6 +44,21 @@ fn unix_to_utc(ts: i64, which: &str) -> Result<DateTime<Utc>, ApiError> {
     })
 }
 
+/*
+ * Limite comun a series y timeline de reboots: si viene, debe estar en
+ * [1, max]; si no, default.
+ */
+pub fn parse_limit(raw: Option<i64>, default: i64, max: i64) -> Result<i64, ApiError> {
+    let limit = raw.unwrap_or(default);
+    if !(1..=max).contains(&limit) {
+        return Err(ApiError::bad_request(
+            "invalid_limit",
+            format!("limit debe estar entre 1 y {max}"),
+        ));
+    }
+    Ok(limit)
+}
+
 impl SeriesQuery {
     pub fn into_filter(self) -> Result<SeriesFilter, ApiError> {
         let entity = match self.entity {
@@ -67,13 +84,7 @@ impl SeriesQuery {
             }
         }
 
-        let limit = self.limit.unwrap_or(DEFAULT_SERIES_POINTS);
-        if !(1..=MAX_SERIES_POINTS).contains(&limit) {
-            return Err(ApiError::bad_request(
-                "invalid_limit",
-                format!("limit debe estar entre 1 y {MAX_SERIES_POINTS}"),
-            ));
-        }
+        let limit = parse_limit(self.limit, DEFAULT_SERIES_POINTS, MAX_SERIES_POINTS)?;
 
         Ok(SeriesFilter {
             entity,
@@ -81,6 +92,17 @@ impl SeriesQuery {
             to,
             limit,
         })
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RebootsQuery {
+    pub limit: Option<i64>,
+}
+
+impl RebootsQuery {
+    pub fn into_limit(self) -> Result<i64, ApiError> {
+        parse_limit(self.limit, DEFAULT_REBOOTS_LIMIT, MAX_REBOOTS_LIMIT)
     }
 }
 
@@ -189,5 +211,25 @@ mod tests {
         .into_filter()
         .unwrap();
         assert_eq!(f.limit, MAX_SERIES_POINTS);
+    }
+
+    #[test]
+    fn reboots_default_limit() {
+        let l = RebootsQuery { limit: None }.into_limit().unwrap();
+        assert_eq!(l, DEFAULT_REBOOTS_LIMIT);
+    }
+
+    #[test]
+    fn reboots_limit_above_max_is_rejected() {
+        let r = RebootsQuery {
+            limit: Some(MAX_REBOOTS_LIMIT + 1),
+        }
+        .into_limit();
+        assert!(r.is_err());
+    }
+
+    #[test]
+    fn parse_limit_rejects_zero() {
+        assert!(parse_limit(Some(0), DEFAULT_REBOOTS_LIMIT, MAX_REBOOTS_LIMIT).is_err());
     }
 }

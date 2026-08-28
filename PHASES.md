@@ -16,11 +16,11 @@ desarrollo con commits progresivos.
       Proyecto Axum, migraciones PostgreSQL (`agents`, `metric_samples`),
       registro de agentes, ingestion con validación, autenticación por
       bearer token. Ver detalle abajo. ADR-0003.
-- [ ] **Fase 4 — Collector: query API + estados de conectividad**
+- [x] **Fase 4 — Collector: query API + estados de conectividad**
       Endpoints GET, máquina de estados ONLINE/DEGRADED/OFFLINE, detección
       de reboot. Subdividida en 3 bloques: **4.1** query API de lectura
       (entregado), **4.2** máquina de estados (entregado), **4.3**
-      detección de reboot (pendiente). Ver detalle abajo.
+      detección de reboot (entregado). Ver detalle abajo.
 - [ ] **Fase 5 — Alert engine**
       Reglas declarativas, máquina de estados
       INACTIVE→PENDING→FIRING→RESOLVED, hysteresis, deduplicación,
@@ -221,8 +221,28 @@ desarrollo con commits progresivos.
     `src/db.rs::get_agent`, `ApiError::not_found`.
   - 10 tests unitarios nuevos (4 de config + 6 de state; 35 en total).
 
-- **Bloque 4.3 — Deteccion de reboot** (pendiente): comparar `system.uptime`
-  entre muestras consecutivas de un agent y registrar los reboots.
+- **Bloque 4.3 — Deteccion de reboot (entregado):**
+  - `system.uptime` es monotono (segundos desde el boot del host); en
+    ingestion se compara cada sample contra el ultimo uptime del agente
+    y, si cayo mas que la tolerancia, se registra un `reboot_events`.
+  - Migracion `migrations/0002_reboot_events.sql`: tabla `reboot_events`
+    (agent_id FK, `detected_at` hora de arribo, `sample_ts` del agent,
+    `uptime_before`/`uptime_after`) + indice `(agent_id, detected_at)`.
+  - Tolerancia `OBS_REBOOT_MIN_UPTIME_DROP_SECS` (default **2.0s**)
+    validada no-negativa al arrancar; filtra el redondeo del segundo de
+    `/proc/uptime` sin perder un reboot real (que cae a segundos desde
+    cero). `src/reboot.rs::detect_reboot` (puro, rechaza NaN/Inf).
+  - `src/db.rs::ingest_sample` reemplaza a `insert_metrics`: lectura del
+    uptime previo (`ORDER BY ts DESC, id DESC LIMIT 1`), deteccion,
+    insert de metricas y de `reboot_events` en UNA transaccion con lock
+    del agente (`SELECT ... FOR UPDATE`) para serializar ingestiones
+    concurrentes del mismo host. Previo por ts con tiebreak de id
+    (determinista ante timestamps iguales).
+  - Query API: `GET /api/v1/agents/{agent_id}/reboots` (timeline,
+    `limit` default 50 tope 1000); detalle de agente con
+    `reboot_count` + `last_reboot`.
+  - 13 tests unitarios nuevos (8 reboot + 2 config + 3 query; 48 en
+    total).
 
 **Validado en este entorno:**
 
@@ -247,3 +267,16 @@ desarrollo con commits progresivos.
   devuelve el detalle con estado; desconocido -> 404 `unknown_agent`; sin
   token -> 401. La DB contenía ademas un agente de la prueba del bloque
   4.1 (13min) correctamente marcado OFFLINE.
+- Bloque 4.3 validado en este entorno: collector real + 5 samples con
+  uptimes `3600.5 -> 3601.5 -> 3601.9 -> 3.2 -> 5.4` (ts ascendentes).
+  Solo `3.2` (caida de ~3598s) marco `reboot_detected=true`; las subidas
+  y la caida de 0.6s (redondeo < 2s de tolerancia) no. `GET .../reboots`
+  devolvio el evento con `uptime_before=3601.9`, `uptime_after=3.2`;
+  detalle con `reboot_count=1` y `last_reboot`. Descubierto y corregido
+  en el camino: con timestamps identicos `ORDER BY ts DESC` era no
+  determinista (falso reboot); se agrego tiebreak `id DESC`. Agent sin
+  reboots -> `reboot_count=0`, `last_reboot=null`. `limit=0` -> 400;
+  sin token -> 401.
+- Cierre de Fase 4: blocques 4.1, 4.2 y 4.3 validados con postgres real
+  (migraciones 0001 + 0002 aplicadas al arranque), build limpio y 48
+  tests en verde.

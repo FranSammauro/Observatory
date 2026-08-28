@@ -18,7 +18,7 @@ use crate::config::Config;
 use crate::db;
 use crate::error::ApiError;
 use crate::models::{HeartbeatPayload, MetricsPayload, Validate};
-use crate::query::SeriesQuery;
+use crate::query::{RebootsQuery, SeriesQuery};
 use crate::state::{connectivity_state, StateLimits};
 use crate::validation::{utc_from_unix_ts, TimeLimits};
 
@@ -37,6 +37,10 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/v1/metrics", post(metrics_handler))
         .route("/api/v1/agents", get(agents_list_handler))
         .route("/api/v1/agents/{agent_id}", get(agent_detail_handler))
+        .route(
+            "/api/v1/agents/{agent_id}/reboots",
+            get(agent_reboots_handler),
+        )
         .route(
             "/api/v1/agents/{agent_id}/metrics",
             get(agent_metrics_handler),
@@ -110,10 +114,36 @@ async fn metrics_handler(
     db::upsert_agent(&state.pool, &agent_id).await?;
 
     let rows = payload.to_metric_rows();
-    db::insert_metrics(&state.pool, &agent_id, ts, &rows).await?;
+    let current_uptime = rows
+        .iter()
+        .find(|(name, entity, _)| name == "system.uptime" && entity.is_none())
+        .map(|(_, _, value)| *value);
+
+    let report = db::ingest_sample(
+        &state.pool,
+        &agent_id,
+        ts,
+        &rows,
+        current_uptime,
+        state.config.reboot_min_uptime_drop_secs,
+    )
+    .await?;
+
+    if report.reboot_detected {
+        tracing::info!(
+            %agent_id,
+            uptime_before = report.uptime_before,
+            uptime_after = report.uptime_after,
+            "reboot detectado"
+        );
+    }
 
     tracing::debug!(%agent_id, n = rows.len(), "sample almacenado");
-    Ok(Json(json!({"status": "ok", "stored": rows.len()})))
+    Ok(Json(json!({
+        "status": "ok",
+        "stored": rows.len(),
+        "reboot_detected": report.reboot_detected,
+    })))
 }
 
 /*
@@ -150,10 +180,39 @@ async fn agent_detail_handler(
         .ok_or_else(|| ApiError::not_found("unknown_agent", "agent no registrado"))?;
 
     let limits = state.config.state_limits();
-    let body = agent_json(&agent, Utc::now(), &limits);
+    let stats = db::reboot_stats(&state.pool, &agent_id).await?;
+
+    let mut body = agent_json(&agent, Utc::now(), &limits);
+    body["reboot_count"] = json!(stats.count);
+    body["last_reboot"] = stats
+        .last
+        .map(|r| json!({"detected_at": r.detected_at, "sample_ts": r.sample_ts}))
+        .unwrap_or_else(|| json!(null));
+
     let state = body["state"].as_str().unwrap_or("?");
     tracing::debug!(%agent_id, state, "query: detalle de agente");
     Ok(Json(body))
+}
+
+async fn agent_reboots_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(agent_id): Path<String>,
+    params: std::result::Result<Query<RebootsQuery>, QueryRejection>,
+) -> Result<impl IntoResponse> {
+    check_bearer(&headers, &state.config.auth_token)?;
+
+    let agent_id = parse_agent_uuid(&agent_id)?;
+    let limit = params
+        .map_err(|_| ApiError::bad_request("invalid_query", "parametros de query invalidos"))?
+        .0
+        .into_limit()?;
+
+    let reboots = db::list_reboots(&state.pool, &agent_id, limit).await?;
+    tracing::debug!(%agent_id, n = reboots.len(), "query: reboots de agente");
+    Ok(Json(
+        json!({"agent_id": agent_id, "reboots": reboots, "count": reboots.len()}),
+    ))
 }
 
 /*

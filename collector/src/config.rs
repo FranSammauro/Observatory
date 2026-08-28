@@ -13,6 +13,11 @@ pub const MAX_METRIC_KEYS: usize = 1024;
 pub const DEFAULT_SERIES_POINTS: i64 = 1_000;
 pub const MAX_SERIES_POINTS: i64 = 10_000;
 
+/* Timeline de reboots (bloque 4.3): eventos infrecuentes, alcanza con
+ * menos margen que una serie. */
+pub const DEFAULT_REBOOTS_LIMIT: i64 = 50;
+pub const MAX_REBOOTS_LIMIT: i64 = 1_000;
+
 #[derive(Debug, Clone)]
 pub struct Config {
     pub listen_addr: String,
@@ -24,6 +29,7 @@ pub struct Config {
     pub max_body_bytes: usize,
     pub state_online_secs: i64,
     pub state_degraded_secs: i64,
+    pub reboot_min_uptime_drop_secs: f64,
 }
 
 fn parse_u32(name: &str, default: u32) -> Result<u32, String> {
@@ -46,6 +52,16 @@ fn parse_i64(name: &str, default: i64) -> Result<i64, String> {
     }
 }
 
+fn parse_f64(name: &str, default: f64) -> Result<f64, String> {
+    match env::var(name) {
+        Ok(v) => v
+            .trim()
+            .parse()
+            .map_err(|_| format!("{name} no es un numero valido: '{v}'")),
+        Err(_) => Ok(default),
+    }
+}
+
 impl Config {
     pub fn from_env() -> Result<Self, String> {
         let database_url = env::var("DATABASE_URL")
@@ -64,8 +80,10 @@ impl Config {
         let max_body_bytes = parse_u32("OBS_MAX_BODY_BYTES", 256 * 1024)? as usize;
         let state_online_secs = parse_i64("OBS_STATE_ONLINE_SECS", 15)?;
         let state_degraded_secs = parse_i64("OBS_STATE_DEGRADED_SECS", 60)?;
+        let reboot_min_uptime_drop_secs = parse_f64("OBS_REBOOT_MIN_UPTIME_DROP_SECS", 2.0)?;
 
         validate_state_limits(state_online_secs, state_degraded_secs)?;
+        validate_reboot_drop(reboot_min_uptime_drop_secs)?;
 
         Ok(Self {
             listen_addr,
@@ -77,7 +95,20 @@ impl Config {
             max_body_bytes,
             state_online_secs,
             state_degraded_secs,
+            reboot_min_uptime_drop_secs,
         })
+    }
+}
+
+/*
+ * Caida minima de uptime para considerarla un reboot (bloque 4.3): no
+ * puede ser negativa (una caida es una caida).
+ */
+pub fn validate_reboot_drop(min_drop_secs: f64) -> Result<(), String> {
+    if min_drop_secs.is_finite() && min_drop_secs >= 0.0 {
+        Ok(())
+    } else {
+        Err("OBS_REBOOT_MIN_UPTIME_DROP_SECS debe ser un numero no negativo".to_string())
     }
 }
 
@@ -120,5 +151,18 @@ mod tests {
     #[test]
     fn state_limits_equal_is_valid() {
         assert!(validate_state_limits(15, 15).is_ok());
+    }
+
+    #[test]
+    fn reboot_drop_accepts_zero_and_positive() {
+        assert!(validate_reboot_drop(0.0).is_ok());
+        assert!(validate_reboot_drop(2.5).is_ok());
+    }
+
+    #[test]
+    fn reboot_drop_rejects_negative_and_non_finite() {
+        assert!(validate_reboot_drop(-1.0).is_err());
+        assert!(validate_reboot_drop(f64::NAN).is_err());
+        assert!(validate_reboot_drop(f64::INFINITY).is_err());
     }
 }

@@ -4,6 +4,8 @@ use sqlx::postgres::{PgPool, PgPoolOptions};
 use sqlx::FromRow;
 use uuid::Uuid;
 
+use crate::reboot::detect_reboot;
+
 /*
  * Acceso a PostgreSQL. El pool se crea al startup; las migraciones se
  * embeben en el binario (sqlx::migrate! con `collector/migrations/`) y
@@ -47,19 +49,33 @@ pub async fn upsert_agent(pool: &PgPool, agent_id: &Uuid) -> Result<(), sqlx::Er
 }
 
 /*
- * Inserta un sample completo en una transaccion, en una sola sentencia
- * via UNNEST de tres arrays paralelos (metric_name, entity, value).
+ * Ingestion de un sample completo + deteccion de reboot (bloque 4.3), en
+ * una sola transaccion:
+ *   1. Lock del agente (SELECT ... FOR UPDATE) para serializar los
+ *      samples del mismo host: dos ingestiones concurrentes no pueden
+ *      leer el mismo uptime previo y duplicar o perder un reboot.
+ *   2. Ultimo `system.uptime` conocido del agente (entity NULL).
+ *   3. Si el uptime actual cayo mas que la tolerancia -> reboot: se
+ *      registra en `reboot_events`.
+ *   4. Insert de las metricas con UNNEST de tres arrays paralelos.
+ *
  * Los escalares llevan entity = NULL; las metricas por-entidad lo llevan
  * con el label correspondiente.
  */
-pub async fn insert_metrics(
+pub async fn ingest_sample(
     pool: &PgPool,
     agent_id: &Uuid,
     ts: DateTime<Utc>,
     rows: &[(String, Option<String>, f64)],
-) -> Result<(), sqlx::Error> {
+    current_uptime: Option<f64>,
+    min_uptime_drop_secs: f64,
+) -> Result<IngestReport, sqlx::Error> {
     if rows.is_empty() {
-        return Ok(());
+        return Ok(IngestReport {
+            reboot_detected: false,
+            uptime_before: None,
+            uptime_after: None,
+        });
     }
 
     let names: Vec<String> = rows.iter().map(|r| r.0.clone()).collect();
@@ -67,6 +83,25 @@ pub async fn insert_metrics(
     let values: Vec<f64> = rows.iter().map(|r| r.2).collect();
 
     let mut tx = pool.begin().await?;
+
+    sqlx::query("SELECT 1 FROM agents WHERE agent_id = $1 FOR UPDATE")
+        .bind(agent_id)
+        .execute(&mut *tx)
+        .await?;
+
+    let previous_uptime: Option<f64> = sqlx::query_scalar(
+        "SELECT value FROM metric_samples
+         WHERE agent_id = $1 AND metric_name = 'system.uptime' AND entity IS NULL
+         ORDER BY ts DESC, id DESC LIMIT 1",
+    )
+    .bind(agent_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+
+    let reboot_detected = current_uptime
+        .map(|u| detect_reboot(previous_uptime, u, min_uptime_drop_secs))
+        .unwrap_or(false);
+
     sqlx::query(
         "INSERT INTO metric_samples (agent_id, ts, metric_name, entity, value)
          SELECT $1, $2, u.name, u.entity, u.value
@@ -79,8 +114,27 @@ pub async fn insert_metrics(
     .bind(&values)
     .execute(&mut *tx)
     .await?;
+
+    if reboot_detected {
+        sqlx::query(
+            "INSERT INTO reboot_events (agent_id, detected_at, sample_ts, uptime_before, uptime_after)
+             VALUES ($1, now(), $2, $3, $4)",
+        )
+        .bind(agent_id)
+        .bind(ts)
+        .bind(previous_uptime.unwrap_or(0.0))
+        .bind(current_uptime.unwrap_or(0.0))
+        .execute(&mut *tx)
+        .await?;
+    }
+
     tx.commit().await?;
-    Ok(())
+
+    Ok(IngestReport {
+        reboot_detected,
+        uptime_before: previous_uptime,
+        uptime_after: current_uptime,
+    })
 }
 
 /*
@@ -209,4 +263,73 @@ pub async fn query_series(
     .fetch_all(pool)
     .await?;
     Ok(rows)
+}
+
+/*
+ * Timeline de reboots (bloque 4.3): eventos detectados de un agent,
+ * mas recientes primero.
+ */
+#[derive(Serialize, FromRow)]
+pub struct RebootEvent {
+    pub id: i64,
+    pub detected_at: DateTime<Utc>,
+    pub sample_ts: DateTime<Utc>,
+    pub uptime_before: f64,
+    pub uptime_after: f64,
+}
+
+pub async fn list_reboots(
+    pool: &PgPool,
+    agent_id: &Uuid,
+    limit: i64,
+) -> Result<Vec<RebootEvent>, sqlx::Error> {
+    let rows = sqlx::query_as::<_, RebootEvent>(
+        "SELECT id, detected_at, sample_ts, uptime_before, uptime_after
+         FROM reboot_events
+         WHERE agent_id = $1
+         ORDER BY detected_at DESC
+         LIMIT $2",
+    )
+    .bind(agent_id)
+    .bind(limit)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows)
+}
+
+#[derive(Serialize)]
+pub struct RebootStats {
+    pub count: i64,
+    pub last: Option<RebootEvent>,
+}
+
+/*
+ * Conteo + ultimo reboot de un agent, para el detalle del host (host
+ * page del dashboard).
+ */
+pub async fn reboot_stats(pool: &PgPool, agent_id: &Uuid) -> Result<RebootStats, sqlx::Error> {
+    let count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*)::bigint FROM reboot_events WHERE agent_id = $1")
+            .bind(agent_id)
+            .fetch_one(pool)
+            .await?;
+
+    let last = sqlx::query_as::<_, RebootEvent>(
+        "SELECT id, detected_at, sample_ts, uptime_before, uptime_after
+         FROM reboot_events
+         WHERE agent_id = $1
+         ORDER BY detected_at DESC
+         LIMIT 1",
+    )
+    .bind(agent_id)
+    .fetch_optional(pool)
+    .await?;
+
+    Ok(RebootStats { count, last })
+}
+
+pub struct IngestReport {
+    pub reboot_detected: bool,
+    pub uptime_before: Option<f64>,
+    pub uptime_after: Option<f64>,
 }

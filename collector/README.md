@@ -4,10 +4,9 @@ Collector central en **Rust (Axum)** que recibe los payloads que emite el
 agent C (`observer-agent`), los valida, los autentica por bearer token, y
 los persiste en PostgreSQL.
 
-> Estado actual: **Fase 4** (en curso) — bloques 4.1 (query API de lectura)
-> y 4.2 (maquina de estados de conectividad) entregados. Pendiente de la
-> Fase 4: la deteccion de reboot (bloque 4.3, ver
-> [`../PHASES.md`](../PHASES.md)).
+> Estado actual: **Fase 4** (entregada) — query API de lectura (4.1),
+> maquina de estados de conectividad (4.2) y deteccion de reboot (4.3).
+> Ver [`../PHASES.md`](../PHASES.md).
 
 ## Arquitectura
 
@@ -33,8 +32,12 @@ token:
 - `GET /api/v1/agents` — agentes registrados con **estado de
   conectividad derivado** (bloque 4.2): `state` `online|degraded|offline`
   y `last_seen_age_secs`, ordenados por actividad descendente.
-- `GET /api/v1/agents/{agent_id}` — detalle de un agente (mismo formato;
-  `404 unknown_agent` si no está registrado).
+- `GET /api/v1/agents/{agent_id}` — detalle de un agente (formato de
+  lista + `reboot_count` y `last_reboot`); `404 unknown_agent` si no está
+  registrado.
+- `GET /api/v1/agents/{agent_id}/reboots` — timeline de reboots
+  detectados (`detected_at`, `sample_ts`, `uptime_before`, `uptime_after`).
+  Query param `limit` (default 50, tope 1000).
 - `GET /api/v1/agents/{agent_id}/metrics` — series del agente: por
   `(metric_name, entity)`, con conteo de muestras, rango temporal y el
   ultimo valor (para la vista "host" del dashboard sin pedir la serie).
@@ -52,6 +55,14 @@ Estado de conectividad: se **deriva** de `agents.last_seen` (hora de
 arribo, ADR-0003), no se persiste. Con `OBS_STATE_ONLINE_SECS` y
 `OBS_STATE_DEGRADED_SECS` (default 15s y 60s, base heartbeat 5s):
 `age <= online` -> ONLINE, `age <= degraded` -> DEGRADED, sino OFFLINE.
+
+Deteccion de reboot (bloque 4.3): `system.uptime` es monotono, asi que en
+ingestion se compara cada sample contra el ultimo uptime del agente; si
+cayo mas que `OBS_REBOOT_MIN_UPTIME_DROP_SECS` (default 2s, filtra el
+redondeo del segundo) se registra un `reboot_events`. La lectura y el
+registro van en una sola transaccion con lock del agente
+(`SELECT ... FOR UPDATE`) para que dos ingestiones concurrentes del mismo
+host no dupliquen ni pierdan eventos.
 
 Infra:
 
@@ -79,6 +90,7 @@ Contrato de payloads: ver [`../agent/src/protocol.c`](../agent/src/protocol.c)
 | `OBS_MAX_BODY_BYTES` | `262144` | limite de body (el agent manda <= 16 KB) |
 | `OBS_STATE_ONLINE_SECS` | `15` | antiguedad de `last_seen` para ONLINE (bloque 4.2) |
 | `OBS_STATE_DEGRADED_SECS` | `60` | antiguedad de `last_seen` para DEGRADED (bloque 4.2) |
+| `OBS_REBOOT_MIN_UPTIME_DROP_SECS` | `2.0` | caida minima de uptime para considerar reboot (bloque 4.3) |
 | `RUST_LOG` | `info` | nivel de log (tracing) |
 
 ## Build y tests
@@ -86,7 +98,7 @@ Contrato de payloads: ver [`../agent/src/protocol.c`](../agent/src/protocol.c)
 ```sh
 cargo build            # debug
 cargo build --release  # release (LTO + codegen-units=1)
-cargo test             # 35 tests unitarios (sin DB)
+cargo test             # 48 tests unitarios (sin DB)
 cargo clippy           # lint, sin warnings
 cargo fmt              # formato
 ```
@@ -122,6 +134,8 @@ agent_token = tu-token
   los escalares de `metrics` usan `entity = NULL`; las metricas de los
   arrays (disk/network/filesystem) usan `entity` = device / interface /
   mountpoint.
+- `reboot_events` — una fila por reboot detectado (bloque 4.3):
+  `detected_at`, `sample_ts`, `uptime_before`, `uptime_after`.
 
 ## Limites de cardinalidad
 
@@ -132,8 +146,10 @@ entradas -> `400 too_many_entities`; el objeto `metrics` con mas de
 no finitos (NaN/Inf) no pueden llegar a la DB: `serde_json` los rechaza
 a nivel de parsing (`400 invalid_json`).
 
-## Proximos pasos (Fase 4, bloque pendiente)
+## Proximos pasos (Fase 5)
 
-- Deteccion de reboot (uptime decreciente entre muestras) (bloque 4.3).
+- Alert engine: reglas declarativas, maquina de estados
+  INACTIVE->PENDING->FIRING->RESOLVED, hysteresis, deduplicacion,
+  historial.
 
 Ver [`../PHASES.md`](../PHASES.md).
