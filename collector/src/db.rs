@@ -1,5 +1,7 @@
 use chrono::{DateTime, Utc};
+use serde::Serialize;
 use sqlx::postgres::{PgPool, PgPoolOptions};
+use sqlx::FromRow;
 use uuid::Uuid;
 
 /*
@@ -79,4 +81,117 @@ pub async fn insert_metrics(
     .await?;
     tx.commit().await?;
     Ok(())
+}
+
+/*
+ * Query API (Fase 4, bloque 1). Endpoints GET de solo lectura. Las
+ * consultas explotan los indices de `metric_samples` que ya dejamos para
+ * esto en 0001_init.sql (lookup (agent_id, metric_name, entity, ts DESC)).
+ */
+
+#[derive(Serialize, FromRow)]
+pub struct AgentRow {
+    pub agent_id: Uuid,
+    pub first_seen: DateTime<Utc>,
+    pub last_seen: DateTime<Utc>,
+}
+
+pub async fn list_agents(pool: &PgPool) -> Result<Vec<AgentRow>, sqlx::Error> {
+    let rows = sqlx::query_as::<_, AgentRow>(
+        "SELECT agent_id, first_seen, last_seen
+         FROM agents
+         ORDER BY last_seen DESC",
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok(rows)
+}
+
+#[derive(Serialize, FromRow)]
+pub struct SeriesMeta {
+    pub metric_name: String,
+    pub entity: Option<String>,
+    pub samples: i64,
+    pub first_ts: Option<DateTime<Utc>>,
+    pub last_ts: Option<DateTime<Utc>>,
+    pub latest_value: Option<f64>,
+}
+
+/*
+ * Series de un agente: una fila por (metric_name, entity) con el conteo de
+ * muestras, el rango temporal y el ultimo valor. El ultimo valor sale de
+ * una subconsulta correlacionada (mismo agente+metrica+entidad, ts mas
+ * reciente) para que la vista "host" del dashboard no tenga que pedir la
+ * serie completa.
+ */
+pub async fn list_agent_series(
+    pool: &PgPool,
+    agent_id: &Uuid,
+) -> Result<Vec<SeriesMeta>, sqlx::Error> {
+    let rows = sqlx::query_as::<_, SeriesMeta>(
+        "SELECT s.metric_name,
+                s.entity,
+                COUNT(*)::bigint              AS samples,
+                MIN(s.ts)                     AS first_ts,
+                MAX(s.ts)                     AS last_ts,
+                (SELECT t.value
+                   FROM metric_samples t
+                  WHERE t.agent_id = $1
+                    AND t.metric_name = s.metric_name
+                    AND t.entity IS NOT DISTINCT FROM s.entity
+                  ORDER BY t.ts DESC
+                  LIMIT 1)                    AS latest_value
+         FROM metric_samples s
+         WHERE s.agent_id = $1
+         GROUP BY s.metric_name, s.entity
+         ORDER BY s.metric_name, s.entity",
+    )
+    .bind(agent_id)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows)
+}
+
+#[derive(Serialize, FromRow)]
+pub struct SamplePoint {
+    pub ts: DateTime<Utc>,
+    pub value: f64,
+}
+
+/*
+ * Serie temporal de una metrica. Filtros opcionales por entity, from y to
+ * (ambos inclusive), y limite de puntos. Ordenada por ts ASC (forma
+ * natural para graficar). El OR con parametros NULL evita armar SQL
+ * dinamico.
+ */
+#[allow(clippy::too_many_arguments)]
+pub async fn query_series(
+    pool: &PgPool,
+    agent_id: &Uuid,
+    metric: &str,
+    entity: Option<&str>,
+    from: Option<DateTime<Utc>>,
+    to: Option<DateTime<Utc>>,
+    limit: i64,
+) -> Result<Vec<SamplePoint>, sqlx::Error> {
+    let rows = sqlx::query_as::<_, SamplePoint>(
+        "SELECT ts, value
+         FROM metric_samples
+         WHERE agent_id = $1
+           AND metric_name = $2
+           AND ($3::text IS NULL OR entity = $3)
+           AND ($4::timestamptz IS NULL OR ts >= $4)
+           AND ($5::timestamptz IS NULL OR ts <= $5)
+         ORDER BY ts ASC
+         LIMIT $6",
+    )
+    .bind(agent_id)
+    .bind(metric)
+    .bind(entity)
+    .bind(from)
+    .bind(to)
+    .bind(limit)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows)
 }

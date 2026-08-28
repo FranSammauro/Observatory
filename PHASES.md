@@ -18,7 +18,9 @@ desarrollo con commits progresivos.
       bearer token. Ver detalle abajo. ADR-0003.
 - [ ] **Fase 4 — Collector: query API + estados de conectividad**
       Endpoints GET, máquina de estados ONLINE/DEGRADED/OFFLINE, detección
-      de reboot.
+      de reboot. Subdividida en 3 bloques: **4.1** query API de lectura
+      (entregado), **4.2** máquina de estados, **4.3** detección de
+      reboot. Ver detalle abajo.
 - [ ] **Fase 5 — Alert engine**
       Reglas declarativas, máquina de estados
       INACTIVE→PENDING→FIRING→RESOLVED, hysteresis, deduplicación,
@@ -175,8 +177,53 @@ desarrollo con commits progresivos.
 
 **Pendiente para Fases 4+ (no es parte de Fase 3):**
 
-- Query API (endpoints GET de series) y maquina de estados
-  ONLINE/DEGRADED/OFFLINE (Fase 4 — ver ADR-0003, la DB ya mantiene
-  last_seen para derivarla).
+- Maquina de estados ONLINE/DEGRADED/OFFLINE (Fase 4 — ver ADR-0003, la
+  DB ya mantiene last_seen para derivarla).
 - Deteccion de reboot al comparar uptime entre muestras (Fase 4).
 - Tokens per-agent y TLS (Fase 8).
+
+## Fase 4 — detalle
+
+**Subdivision en 3 bloques:**
+
+- **Bloque 4.1 — Query API de lectura (entregado):**
+  - `GET /api/v1/agents` — agentes registrados (id, first_seen,
+    last_seen), ordenados por actividad descendente.
+  - `GET /api/v1/agents/{agent_id}/metrics` — series del agente
+    agrupadas por `(metric_name, entity)` con conteo, rango temporal y el
+    ultimo valor (subconsulta correlacionada con `$1` constante, indice
+    de 0001_init.sql).
+  - `GET /api/v1/agents/{agent_id}/metrics/{metric}` — serie temporal con
+    filtros opcionales `entity`, `from`/`to` (epoch, inclusive, `from <=
+    to`) y `limit` (default 1000, tope 10000). Respuesta JSON con `ts`
+    RFC3339 y `value`, ordenada ASC. SQL con `($n IS NULL OR col = $n)`
+    para evitar armar queries dinamicos.
+  - Validacion de los parametros en `src/query.rs` (pura, sin DB):
+    entity no vacia, de `from`/`to` (timestamps validos, `from <= to`) y
+    de `limit` (1..=10000). Parametros malformados -> 400 `invalid_query`.
+  - Los GET usan el mismo bearer token compartido que la ingestion.
+  - `src/db.rs`: `list_agents`, `list_agent_series`, `query_series`.
+  - 8 tests unitarios nuevos en `src/query.rs` (25 en total).
+
+- **Bloque 4.2 — Maquina de estados ONLINE/DEGRADED/OFFLINE**
+  (pendiente): derivar el estado de conectividad de `agents.last_seen`
+  (ventanas de degradado/offline configurables) y exponerlo en el query
+  API.
+
+- **Bloque 4.3 — Deteccion de reboot** (pendiente): comparar `system.uptime`
+  entre muestras consecutivas de un agent y registrar los reboots.
+
+**Validado en este entorno:**
+
+- Build limpio (`cargo build`), `cargo clippy` y `cargo fmt` sin
+  hallazgos; 25/25 tests en verde.
+- Integración real: postgres de desarrollo + collector + 3 samples
+  inyectados por `POST /api/v1/metrics`. Verificado: `GET /api/v1/agents`
+  (1 agente, last_seen avanzando), series del agente (7 series con
+  entity NULL y "sda" correctos, latest_value = ultima muestra), serie
+  de `system.memory.total` con 4 puntos ordenados ASC, filtro `entity=sda`
+  (3 puntos), rango `from`/`to` (2 puntos), `limit=2`.
+- Casos negativos por HTTP: sin token -> 401; `agent_id` invalido -> 400
+  `invalid_agent_id`; `from > to` -> 400 `invalid_time_range`; `entity`
+  vacia -> 400 `invalid_entity`; `limit=0` -> 400 `invalid_limit`; `from`
+  no numerico -> 400 `invalid_query`.

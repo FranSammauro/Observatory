@@ -7,6 +7,12 @@ pub const MAX_ARRAY_ENTRIES: usize = 16;
  * cliente descompuesto/malicioso inyecte miles de series por sample. */
 pub const MAX_METRIC_KEYS: usize = 1024;
 
+/* Limites del query API (Fase 4, bloque 1): cuantos puntos devolver por
+ * serie. Topes defensivos contra peticiones gigantes; el dashboard pide
+ * rangos cortos (~centenas de puntos). */
+pub const DEFAULT_SERIES_POINTS: i64 = 1_000;
+pub const MAX_SERIES_POINTS: i64 = 10_000;
+
 #[derive(Debug, Clone)]
 pub struct Config {
     pub listen_addr: String,

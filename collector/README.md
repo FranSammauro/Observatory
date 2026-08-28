@@ -4,10 +4,10 @@ Collector central en **Rust (Axum)** que recibe los payloads que emite el
 agent C (`observer-agent`), los valida, los autentica por bearer token, y
 los persiste en PostgreSQL.
 
-> Estado actual: **Fase 3** — ingestion + registro implicito de agentes +
-> validacion + autenticacion. El query API (GET), la maquina de estados
-> ONLINE/DEGRADED/OFFLINE y la deteccion de reboot son **Fase 4** (ver
-> [`../PHASES.md`](../PHASES.md)).
+> Estado actual: **Fase 4** (en curso) — query API de lectura (bloque 4.1)
+> entregado: endpoints GET de agentes/series. Pendiente de la Fase 4: la
+> maquina de estados ONLINE/DEGRADED/OFFLINE y la deteccion de reboot
+> (bloques 4.2/4.3, ver [`../PHASES.md`](../PHASES.md)).
 
 ## Arquitectura
 
@@ -15,12 +15,37 @@ los persiste en PostgreSQL.
 Agent (C) --POST /api/v1/metrics--> Collector (Rust/Axum) --> PostgreSQL
           --POST /api/v1/agents/heartbeat-->          ^
                           (Authorization: Bearer <token>)
+
+Dashboard  --GET /api/v1/...--> Collector --> PostgreSQL
+                          (Authorization: Bearer <token>)
 ```
 
 Endpoints:
 
+Ingestion (Fase 3):
+
 - `POST /api/v1/metrics` — sample completo de metricas del agent.
 - `POST /api/v1/agents/heartbeat` — heartbeat liviano (mas frecuente).
+
+Query API (Fase 4, bloque 4.1) — de solo lectura, mismo bearer token:
+
+- `GET /api/v1/agents` — agentes registrados (`first_seen`, `last_seen`),
+  ordenados por actividad descendente.
+- `GET /api/v1/agents/{agent_id}/metrics` — series del agente: por
+  `(metric_name, entity)`, con conteo de muestras, rango temporal y el
+  ultimo valor (para la vista "host" del dashboard sin pedir la serie).
+- `GET /api/v1/agents/{agent_id}/metrics/{metric}` — serie temporal de
+  una metrica. Query params (todos opcionales):
+  - `entity` — label de la serie (device/interface/mountpoint). Se omite
+    para escalares (entity NULL).
+  - `from` / `to` — rango en segundos epoch, inclusive; `from` debe ser
+    `<= to`.
+  - `limit` — maximo de puntos (default 1000, tope 10000).
+  - Respuesta: `{agent_id, metric, entity, from, to, count, points[]}`
+    con `points` de `{ts, value}` ordenados ascendentemente.
+
+Infra:
+
 - `GET /healthz` — chequeo de salud (incluye ping a la DB).
 
 Contrato de payloads: ver [`../agent/src/protocol.c`](../agent/src/protocol.c)
@@ -50,7 +75,7 @@ Contrato de payloads: ver [`../agent/src/protocol.c`](../agent/src/protocol.c)
 ```sh
 cargo build            # debug
 cargo build --release  # release (LTO + codegen-units=1)
-cargo test             # 16 tests unitarios (sin DB)
+cargo test             # 25 tests unitarios (sin DB)
 cargo clippy           # lint, sin warnings
 cargo fmt              # formato
 ```
@@ -96,10 +121,10 @@ entradas -> `400 too_many_entities`; el objeto `metrics` con mas de
 no finitos (NaN/Inf) no pueden llegar a la DB: `serde_json` los rechaza
 a nivel de parsing (`400 invalid_json`).
 
-## Proximos pasos (Fase 4+)
+## Proximos pasos (Fase 4, bloques pendientes)
 
-- Query API: endpoints GET de series temporales.
-- Maquina de estados ONLINE/DEGRADED/OFFLINE.
-- Deteccion de reboot (uptime decreciente entre muestras).
+- Maquina de estados ONLINE/DEGRADED/OFFLINE derivada de `last_seen`
+  (bloque 4.2).
+- Deteccion de reboot (uptime decreciente entre muestras) (bloque 4.3).
 
 Ver [`../PHASES.md`](../PHASES.md).
