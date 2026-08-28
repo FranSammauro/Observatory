@@ -1,3 +1,4 @@
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use chrono::{DateTime, Duration, Utc};
@@ -67,7 +68,6 @@ pub fn parse_op(s: &str) -> Option<CondOp> {
 
 #[derive(Debug, Clone)]
 pub struct AlertRule {
-    pub name: String,
     pub metric_name: String,
     pub entity: Option<String>,
     pub op: CondOp,
@@ -78,7 +78,6 @@ pub struct AlertRule {
 impl AlertRule {
     pub fn from_row(row: &AlertRuleRow) -> Option<AlertRule> {
         Some(AlertRule {
-            name: row.name.clone(),
             metric_name: row.metric_name.clone(),
             entity: row.entity.clone(),
             op: parse_op(&row.op)?,
@@ -231,15 +230,168 @@ impl CreateRule {
     }
 }
 
-pub struct EvalSummary {
-    pub rules: usize,
-    pub agents: usize,
-    pub holding: usize,
+/*
+ * Maquina de estados (bloque 5.2). Estados nominales del informe:
+ * INACTIVE -> PENDING -> FIRING -> RESOLVED.
+ *
+ *   INACTIVE : no hay condicion sostenida. No se persiste (ausencia de
+ *              fila en `alerts`).
+ *   PENDING  : la condicion se sostiene pero todavia no alcanzo `for_secs`
+ *              de la regla. Si deja de sostenerse antes -> RESOLVED.
+ *   FIRING   : la condicion se sostuvo `for_secs` (o mas). Con
+ *              hysteresis: no se resuelve apenas la condicion cae; se
+ *              mantiene hasta que la condicion este ausente
+ *              OBS_ALERT_RESOLVE_GRACE_SECS (evita flapping).
+ *   RESOLVED : el tramo termino (PENDING que cae, o FIRING con ventana
+ *              de resolucion vencida). No se persiste; la fila se borra.
+ *
+ * La transicion es una funcion pura (`next_step`) sobre el estado actual
+ * y el veredicto de `evaluate_series` del bloque 5.1; el evaluador
+ * aplica el resultado en `alerts` en una transaccion (db::apply_alert_steps).
+ */
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AlertState {
+    Pending,
+    Firing,
+}
+
+impl AlertState {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            AlertState::Pending => "pending",
+            AlertState::Firing => "firing",
+        }
+    }
+}
+
+/* Estado actual de una alerta activa, como lo devuelve la DB. Solo
+ * importan el estado y la ventana de resolucion: `since` de la fila es
+ * informativo y se reescribe en cada ciclo con el del veredicto. */
+#[derive(Debug, Clone, Copy)]
+pub struct CurrentAlert {
+    pub state: AlertState,
+    pub resolve_from: Option<DateTime<Utc>>,
+}
+
+/* Condicion sostenida en este ciclo (veredicto del bloque 5.1 reducido). */
+#[derive(Debug, Clone, Copy)]
+pub struct Holding {
+    pub since: DateTime<Utc>,
+    pub meets_for: bool,
 }
 
 /*
- * Un ciclo de evaluacion: reglas habilitadas -> ventana de samples por
- * (regla, agent) -> veredicto. Aun no hay transiciones ni persistencia.
+ * Paso de la maquina que el evaluador debe aplicar. Cada variante mapea a
+ * una operacion de `alerts`:
+ *   Inactive / StayResolving -> nada
+ *   Pending/Firing/StayPending/ToFiring/StayFiring -> UPSERT
+ *   StartResolving -> abrir la ventana de resolucion (resolve_from = now)
+ *   Resolved -> DELETE
+ */
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Step {
+    /* Sin alerta y sin condicion sostenida (INACTIVE). */
+    Inactive,
+    /* Crear fila en pending. */
+    Pending { since: DateTime<Utc> },
+    /* Crear fila en firing (la condicion arranco ya con for cubierto). */
+    Firing { since: DateTime<Utc> },
+    /* Actualizar pending (el tramo sigue, con nuevo inicio). */
+    StayPending { since: DateTime<Utc> },
+    /* pending -> firing. */
+    ToFiring { since: DateTime<Utc> },
+    /* Firing sostenida: limpiar ventana de resolucion. */
+    StayFiring { since: DateTime<Utc> },
+    /* Firing: la condicion cayo, arranca la ventana (hysteresis). */
+    StartResolving,
+    /* Firing: la ventana de resolucion sigue abierta, esperando. */
+    StayResolving,
+    /* RESOLVED: la fila se borra. */
+    Resolved,
+}
+
+/*
+ * Transicion de la maquina, pura y testeable. `current` es la fila activa
+ * (None = INACTIVE), `holding` es Some si la condicion se sostiene en el
+ * tramo (None = NoData/NotHolding). `resolve_grace_secs` es la ventana de
+ * hysteresis; con 0 la resolucion es inmediata.
+ */
+pub fn next_step(
+    current: Option<CurrentAlert>,
+    holding: Option<Holding>,
+    now: DateTime<Utc>,
+    resolve_grace_secs: i64,
+) -> Step {
+    match (current, holding) {
+        (None, None) => Step::Inactive,
+
+        (None, Some(h)) if h.meets_for => Step::Firing { since: h.since },
+        (None, Some(h)) => Step::Pending { since: h.since },
+
+        (Some(c), Some(h)) if c.state == AlertState::Pending => {
+            if h.meets_for {
+                Step::ToFiring { since: h.since }
+            } else {
+                Step::StayPending { since: h.since }
+            }
+        }
+        (Some(_), Some(h)) => Step::StayFiring { since: h.since },
+
+        (Some(c), None) if c.state == AlertState::Pending => Step::Resolved,
+        (Some(c), None) => match c.resolve_from {
+            None if resolve_grace_secs <= 0 => Step::Resolved,
+            None => Step::StartResolving,
+            Some(t0) => {
+                if now.signed_duration_since(t0).num_seconds() >= resolve_grace_secs {
+                    Step::Resolved
+                } else {
+                    Step::StayResolving
+                }
+            }
+        },
+    }
+}
+
+/*
+ * Operaciones que el evaluador le pide a db::apply_alert_steps (una
+ * transaccion por ciclo).
+ */
+#[derive(Debug, Clone, Copy)]
+pub enum AlertOp {
+    Upsert {
+        rule_id: i64,
+        agent_id: Uuid,
+        state: AlertState,
+        since: DateTime<Utc>,
+    },
+    StartResolving {
+        rule_id: i64,
+        agent_id: Uuid,
+    },
+    Resolved {
+        rule_id: i64,
+        agent_id: Uuid,
+    },
+}
+
+pub struct EvalSummary {
+    pub rules: usize,
+    pub agents: usize,
+    pub pending: usize,
+    pub firing: usize,
+    pub resolved: usize,
+}
+
+/*
+ * Un ciclo de evaluacion (bloque 5.2): reglas habilitadas -> ventana de
+ * samples por (regla, agent) -> veredicto -> transicion -> persistencia
+ * en `alerts`.
+ *
+ * El evaluador solo visita agents con series en la ventana, pero las
+ * alertas activas de agents que dejaron de reportar (o de reglas
+ * deshabilitadas) tambien se procesan: entran como "condicion ausente" y
+ * la maquina las resuelve (o las mantiene en la ventana de hysteresis).
  */
 pub async fn eval_cycle(pool: &PgPool, config: &Config) -> Result<EvalSummary, sqlx::Error> {
     let now = Utc::now();
@@ -247,7 +399,9 @@ pub async fn eval_cycle(pool: &PgPool, config: &Config) -> Result<EvalSummary, s
     let mut summary = EvalSummary {
         rules: rows.len(),
         agents: 0,
-        holding: 0,
+        pending: 0,
+        firing: 0,
+        resolved: 0,
     };
 
     if rows.is_empty() {
@@ -256,7 +410,31 @@ pub async fn eval_cycle(pool: &PgPool, config: &Config) -> Result<EvalSummary, s
 
     let from = now - Duration::seconds(config.alert_lookback_secs);
 
+    /* Alertas activas actuales, indexadas por (rule_id, agent_id). */
+    let current_rows = db::list_current_alerts(pool).await?;
+    let mut current: HashMap<(i64, Uuid), CurrentAlert> = HashMap::new();
+    for c in &current_rows {
+        current.insert(
+            (c.rule_id, c.agent_id),
+            CurrentAlert {
+                state: if c.state == "firing" {
+                    AlertState::Firing
+                } else {
+                    AlertState::Pending
+                },
+                resolve_from: c.resolve_from,
+            },
+        );
+    }
+
+    let enabled_ids: HashSet<i64> = rows.iter().map(|r| r.id).collect();
+    let mut name_by_id: HashMap<i64, String> = HashMap::new();
+
+    /* Veredictos del ciclo: (rule_id, agent_id) -> condicion sostenida? */
+    let mut verdicts: HashMap<(i64, Uuid), Option<Holding>> = HashMap::new();
+
     for row in &rows {
+        name_by_id.insert(row.id, row.name.clone());
         let Some(rule) = AlertRule::from_row(row) else {
             tracing::warn!(rule = %row.name, op = %row.op, "regla con operador desconocido, se ignora");
             continue;
@@ -288,26 +466,99 @@ pub async fn eval_cycle(pool: &PgPool, config: &Config) -> Result<EvalSummary, s
         }
 
         for (agent_id, pts) in &series {
-            summary.agents += 1;
-            if let SeriesVerdict::Holding {
-                since,
-                holds_for_secs,
-                meets_for,
-            } = evaluate_series(pts, &rule, now)
-            {
-                summary.holding += 1;
-                tracing::info!(
-                    rule = %rule.name,
-                    %agent_id,
-                    ?since,
-                    holds_for_secs,
-                    meets_for,
-                    "condicion de alerta sostenida"
-                );
+            let holding = match evaluate_series(pts, &rule, now) {
+                SeriesVerdict::Holding {
+                    since, meets_for, ..
+                } => Some(Holding { since, meets_for }),
+                _ => None,
+            };
+            verdicts.insert((row.id, *agent_id), holding);
+        }
+    }
+
+    /* Union de claves: con serie evaluada o solo con alerta activa. */
+    let mut keys: HashSet<(i64, Uuid)> = verdicts.keys().cloned().collect();
+    keys.extend(current.keys().cloned());
+
+    let mut ops: Vec<AlertOp> = Vec::new();
+    for key in keys {
+        summary.agents += 1;
+        let (rule_id, agent_id) = key;
+        let cur = current.get(&key).copied();
+        let holding = verdicts.get(&key).copied().flatten();
+
+        let rule_name = name_by_id.get(&rule_id).map(String::as_str).unwrap_or("?");
+        let step = if cur.is_some() && !enabled_ids.contains(&rule_id) {
+            /* Regla deshabilitada/borrada: su alerta activa se resuelve. */
+            Step::Resolved
+        } else {
+            next_step(cur, holding, now, config.alert_resolve_grace_secs)
+        };
+
+        match step {
+            Step::Inactive | Step::StayResolving => {}
+            Step::Pending { since } => {
+                summary.pending += 1;
+                ops.push(AlertOp::Upsert {
+                    rule_id,
+                    agent_id,
+                    state: AlertState::Pending,
+                    since,
+                });
+                tracing::info!(rule = rule_name, %agent_id, ?since, "alerta pending");
+            }
+            Step::Firing { since } => {
+                summary.firing += 1;
+                ops.push(AlertOp::Upsert {
+                    rule_id,
+                    agent_id,
+                    state: AlertState::Firing,
+                    since,
+                });
+                tracing::info!(rule = rule_name, %agent_id, ?since, "alerta firing");
+            }
+            Step::StayPending { since } => {
+                summary.pending += 1;
+                ops.push(AlertOp::Upsert {
+                    rule_id,
+                    agent_id,
+                    state: AlertState::Pending,
+                    since,
+                });
+            }
+            Step::ToFiring { since } => {
+                summary.firing += 1;
+                ops.push(AlertOp::Upsert {
+                    rule_id,
+                    agent_id,
+                    state: AlertState::Firing,
+                    since,
+                });
+                tracing::info!(rule = rule_name, %agent_id, ?since, "alerta firing (pending -> firing)");
+            }
+            Step::StayFiring { since } => {
+                summary.firing += 1;
+                ops.push(AlertOp::Upsert {
+                    rule_id,
+                    agent_id,
+                    state: AlertState::Firing,
+                    since,
+                });
+            }
+            Step::StartResolving => {
+                summary.firing += 1;
+                ops.push(AlertOp::StartResolving { rule_id, agent_id });
+                tracing::info!(rule = rule_name, %agent_id, "alerta entrando en ventana de resolucion (hysteresis)");
+            }
+            Step::Resolved => {
+                summary.resolved += 1;
+                ops.push(AlertOp::Resolved { rule_id, agent_id });
+                tracing::info!(rule = rule_name, %agent_id, "alerta resuelta");
             }
         }
     }
 
+    db::apply_alert_steps(pool, &ops).await?;
     Ok(summary)
 }
 
@@ -328,7 +579,9 @@ pub fn spawn_evaluator(pool: PgPool, config: Arc<Config>) {
                 Ok(s) => tracing::debug!(
                     rules = s.rules,
                     agents = s.agents,
-                    holding = s.holding,
+                    pending = s.pending,
+                    firing = s.firing,
+                    resolved = s.resolved,
                     "ciclo de alertas evaluado"
                 ),
                 Err(e) => tracing::warn!("ciclo de evaluacion de alertas fallo: {e}"),
@@ -351,7 +604,6 @@ mod tests {
 
     fn rule(op: CondOp, threshold: f64, for_secs: i64) -> AlertRule {
         AlertRule {
-            name: "r".into(),
             metric_name: "m".into(),
             entity: None,
             op,
@@ -511,5 +763,134 @@ mod tests {
     fn parse_op_rejects_unknown() {
         assert_eq!(parse_op("=="), None);
         assert_eq!(parse_op(""), None);
+    }
+
+    fn cur(state: AlertState, resolve_ago: Option<i64>, base: DateTime<Utc>) -> CurrentAlert {
+        CurrentAlert {
+            state,
+            resolve_from: resolve_ago.map(|ago| base - Duration::seconds(ago)),
+        }
+    }
+
+    fn holding(since_ago: i64, meets_for: bool, base: DateTime<Utc>) -> Holding {
+        Holding {
+            since: base - Duration::seconds(since_ago),
+            meets_for,
+        }
+    }
+
+    #[test]
+    fn nothing_holding_is_inactive() {
+        let base = now();
+        assert_eq!(next_step(None, None, base, 60), Step::Inactive);
+    }
+
+    #[test]
+    fn creates_pending_when_holding_below_for() {
+        let base = now();
+        assert_eq!(
+            next_step(None, Some(holding(10, false, base)), base, 60),
+            Step::Pending {
+                since: base - Duration::seconds(10)
+            }
+        );
+    }
+
+    #[test]
+    fn creates_firing_when_for_already_met() {
+        let base = now();
+        assert_eq!(
+            next_step(None, Some(holding(120, true, base)), base, 60),
+            Step::Firing {
+                since: base - Duration::seconds(120)
+            }
+        );
+    }
+
+    #[test]
+    fn pending_stays_pending_below_for() {
+        let base = now();
+        let c = cur(AlertState::Pending, None, base);
+        assert_eq!(
+            next_step(Some(c), Some(holding(30, false, base)), base, 60),
+            Step::StayPending {
+                since: base - Duration::seconds(30)
+            }
+        );
+    }
+
+    #[test]
+    fn pending_promotes_to_firing_when_for_met() {
+        let base = now();
+        let c = cur(AlertState::Pending, None, base);
+        assert_eq!(
+            next_step(Some(c), Some(holding(60, true, base)), base, 60),
+            Step::ToFiring {
+                since: base - Duration::seconds(60)
+            }
+        );
+    }
+
+    #[test]
+    fn pending_drops_resolves_immediately() {
+        let base = now();
+        let c = cur(AlertState::Pending, None, base);
+        assert_eq!(next_step(Some(c), None, base, 60), Step::Resolved);
+    }
+
+    #[test]
+    fn firing_stays_firing_while_holding() {
+        let base = now();
+        /* Incluso si el valor se mantiene por debajo de for_secs: una vez
+         * firing, la condicion sostenida lo mantiene. */
+        let c = cur(AlertState::Firing, None, base);
+        assert_eq!(
+            next_step(Some(c), Some(holding(10, false, base)), base, 60),
+            Step::StayFiring {
+                since: base - Duration::seconds(10)
+            }
+        );
+    }
+
+    #[test]
+    fn firing_opens_resolve_window_when_condition_drops() {
+        let base = now();
+        let c = cur(AlertState::Firing, None, base);
+        assert_eq!(next_step(Some(c), None, base, 60), Step::StartResolving);
+    }
+
+    #[test]
+    fn firing_with_zero_grace_resolves_immediately() {
+        let base = now();
+        let c = cur(AlertState::Firing, None, base);
+        assert_eq!(next_step(Some(c), None, base, 0), Step::Resolved);
+    }
+
+    #[test]
+    fn firing_waits_while_within_grace_window() {
+        let base = now();
+        /* La condicion cayo hace 10s, la ventana es 60s. */
+        let c = cur(AlertState::Firing, Some(10), base);
+        assert_eq!(next_step(Some(c), None, base, 60), Step::StayResolving);
+    }
+
+    #[test]
+    fn firing_resolves_when_grace_window_elapses() {
+        let base = now();
+        let c = cur(AlertState::Firing, Some(60), base);
+        assert_eq!(next_step(Some(c), None, base, 60), Step::Resolved);
+    }
+
+    #[test]
+    fn firing_resolves_at_grace_boundary() {
+        let base = now();
+        let c = cur(AlertState::Firing, Some(59), base);
+        assert_eq!(next_step(Some(c), None, base, 60), Step::StayResolving);
+    }
+
+    #[test]
+    fn alert_state_strings() {
+        assert_eq!(AlertState::Pending.as_str(), "pending");
+        assert_eq!(AlertState::Firing.as_str(), "firing");
     }
 }

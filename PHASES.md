@@ -25,8 +25,9 @@ desarrollo con commits progresivos.
       Reglas declarativas, máquina de estados
       INACTIVE→PENDING→FIRING→RESOLVED, hysteresis, deduplicación,
       historial. Subdividida en 3 bloques: **5.1** reglas declarativas y
-      evaluador (entregado), **5.2** máquina de estados + hysteresis,
-      **5.3** deduplicación + historial + query API. Ver detalle abajo.
+      evaluador (entregado), **5.2** máquina de estados + hysteresis
+      (entregado), **5.3** deduplicación + historial + query API. Ver
+      detalle abajo.
 - [ ] **Fase 6 — Health checks + WebSocket**
       Checks HTTP/TCP, eventos realtime.
 - [ ] **Fase 7 — Dashboard**
@@ -305,9 +306,8 @@ desarrollo con commits progresivos.
   - Evaluador periodico: task de tokio lanzada en `main.rs` que cada
     `OBS_ALERT_EVAL_INTERVAL_SECS` (default **15s**) carga las reglas
     habilitadas, consulta la ventana `OBS_ALERT_LOOKBACK_SECS` (default
-    **300s**) de `metric_samples` por (regla, agent) y loguea cuando una
-    condicion se sostiene. Todavia no transiciona estado ni persiste
-    nada: es el motor que el bloque 5.2 va a consumir.
+    **300s**) de `metric_samples` por (regla, agent) y evalúa la
+    condicion. En 5.1 solo logueaba; desde 5.2 transiciona y persiste.
   - Gestion de reglas por API (mismo bearer token que el resto):
     `POST /api/v1/alerts/rules` (201 con la regla creada),
     `GET /api/v1/alerts/rules`, `DELETE /api/v1/alerts/rules/{id}`
@@ -321,14 +321,37 @@ desarrollo con commits progresivos.
     validados positivos al arrancar (fail-fast, filosofia ADR-0002/0003).
   - Tests unitarios (evaluacion de series + config).
 
-- **Bloque 5.2 — Maquina de estados + hysteresis (pendiente):**
-  - Migracion `0004_alerts.sql`: estado actual persistido por
-    (rule, agent) con transiciones INACTIVE→PENDING→FIRING→RESOLVED en
-    una transaccion, consumiendo `evaluate_series` del bloque 5.1.
-  - Hysteresis: la condicion debe sostenerse `for_secs` para pasar de
-    PENDING a FIRING, y la alerta se resuelve solo cuando la muestra
-    vuelve al lado normal (umbral de salida / ventana de resolucion),
-    para evitar flapping.
+- **Bloque 5.2 — Maquina de estados + hysteresis (entregado):**
+  - Migracion `0004_alerts.sql`: tabla `alerts` con el estado **actual**
+    de cada alerta activa, deduplicado por `PRIMARY KEY (rule_id,
+    agent_id)` (una alerta por regla+agent). INACTIVE y RESOLVED no se
+    persisten: INACTIVE es la ausencia de fila, y al resolverse la fila
+    se borra.
+  - Maquina de estados **INACTIVE→PENDING→FIRING→RESOLVED** en
+    `src/alerts.rs::next_step` — funcion pura y testeable sobre
+    `CurrentAlert` (estado + `resolve_from`) y el veredicto de
+    `evaluate_series` (bloque 5.1):
+    - condicion ausente sin fila -> INACTIVE;
+    - condicion sostenida sin fila -> PENDING (o FIRING directo si ya
+      cubre `for_secs`);
+    - PENDING -> FIRING al cubrir `for_secs`; PENDING que cae ->
+      RESOLVED al instante;
+    - FIRING que cae no se resuelve en el acto: entra en
+      **hysteresis** (`resolve_from`), se mantiene FIRING mientras la
+      condicion este ausente y solo -> RESOLVED cuando la ausencia
+      supera `OBS_ALERT_RESOLVE_GRACE_SECS` (default **60s**, validado
+      no-negativo; 0 = resolucion inmediata). Si la condicion se
+      reestablece, se limpia la ventana.
+  - El evaluador aplica los pasos en UNA transaccion por ciclo
+    (`db::apply_alert_steps`): UPSERT (crear/actualizar con `since` del
+    veredicto y `resolve_from = NULL`), `StartResolving` (abre la ventana)
+    y DELETE (RESOLVED). Ademas resuelve alertas activas de agents que
+    dejaron de reportar (sin serie en la ventana -> condicion ausente) y
+    de reglas deshabilitadas/borradas.
+  - `src/alerts.rs`: `AlertState`, `CurrentAlert`, `Holding`, `Step`,
+    `AlertOp`; `src/db.rs`: `list_current_alerts`, `apply_alert_steps`;
+    `src/config.rs`: `OBS_ALERT_RESOLVE_GRACE_SECS`.
+  - 15 tests unitarios nuevos (12 `next_step` + 3 config; 77 en total).
 
 - **Bloque 5.3 — Deduplicacion + historial + query API (pendiente):**
   - Migracion `0005_alert_events.sql`: historial de transiciones
@@ -337,3 +360,30 @@ desarrollo con commits progresivos.
     idempotentes (no re-disparar ni duplicar eventos).
   - Query API: `GET /api/v1/alerts` (activas y resueltas) e historial,
     con el mismo bearer token y validaciones de parametros.
+
+**Validado en este entorno (bloques 5.1 + 5.2):**
+
+- Build limpio (`cargo build`), `cargo clippy` y `cargo fmt` sin
+  hallazgos; 77 tests en verde (62 en el bloque 5.1, 77 al cerrar 5.2).
+- Bloque 5.1: postgres real + collector + reglas por API. Creacion
+  201, listado, borrado (404 `unknown_rule` / `invalid_rule_id`);
+  negativos: sin token -> 401, duplicado -> 400 `rule_already_exists`,
+  op invalido/entity vacia/threshold no finito/for_secs negativo -> 400
+  con sus codigos. Regla `ge 0.8` con muestra 0.95 -> el evaluador
+  loguea la condicion sostenida; con for_secs=120 -> `meets_for=false`
+  (caso PENDING); con valor 0.2 -> sin disparo.
+- Bloque 5.2: ciclo completo en vivo con `OBS_ALERT_EVAL_INTERVAL_SECS=3`
+  y `OBS_ALERT_RESOLVE_GRACE_SECS=15`:
+  - Muestras con tramo de 60s -> `cpu-alta` (for 30) directo a FIRING y
+    `cpu-lenta` (for 300) a PENDING, `since` = inicio del tramo,
+    `resolve_from` NULL.
+  - Valor bajo inyectado -> `cpu-lenta` (PENDING) se resuelve al
+    instante; `cpu-alta` marca `resolve_from` y sigue FIRING durante la
+    ventana de hysteresis, y solo -> RESOLVED al vencerla (`alerts`
+    queda vacia). Logs: `alerta resuelta`,
+    `alerta entrando en ventana de resolucion (hysteresis)`.
+  - Camino PENDING->FIRING en vivo (regla `temp-alta` for 20 con
+    metrica limpia): sample unico -> PENDING; segundo sample que
+    extiende el tramo a 50s -> `alerta firing (pending -> firing)`.
+  - Deduplicacion por (rule_id, agent_id): una fila por regla+agent en
+    todo el recorrido.

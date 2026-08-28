@@ -22,7 +22,13 @@ pub const MAX_REBOOTS_LIMIT: i64 = 1_000;
  * que ventana de `metric_samples` mirar. El intervalo es ~el periodo de
  * metricas del agent (10s); 15s da 1.5 evaluaciones por muestra. El
  * lookback de 5 min cubre holgadamente `for_secs` tipicos sin arrastrar
- * datos muertos. */
+ * datos muertos.
+ *
+ * Hysteresis (bloque 5.2): ventana de resolucion. Una alerta FIRING no
+ * se resuelve apenas la condicion deja de sostenerse; se mantiene hasta
+ * OBS_ALERT_RESOLVE_GRACE_SECS sin condicion, asi un valor que oscila
+ * alrededor del umbral no flapea entrada/salida. 60s = 4 ciclos del
+ * evaluador (15s) o ~6 muestras de metricas (10s). */
 
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -38,6 +44,7 @@ pub struct Config {
     pub reboot_min_uptime_drop_secs: f64,
     pub alert_eval_interval_secs: i64,
     pub alert_lookback_secs: i64,
+    pub alert_resolve_grace_secs: i64,
 }
 
 fn parse_u32(name: &str, default: u32) -> Result<u32, String> {
@@ -91,10 +98,12 @@ impl Config {
         let reboot_min_uptime_drop_secs = parse_f64("OBS_REBOOT_MIN_UPTIME_DROP_SECS", 2.0)?;
         let alert_eval_interval_secs = parse_i64("OBS_ALERT_EVAL_INTERVAL_SECS", 15)?;
         let alert_lookback_secs = parse_i64("OBS_ALERT_LOOKBACK_SECS", 300)?;
+        let alert_resolve_grace_secs = parse_i64("OBS_ALERT_RESOLVE_GRACE_SECS", 60)?;
 
         validate_state_limits(state_online_secs, state_degraded_secs)?;
         validate_reboot_drop(reboot_min_uptime_drop_secs)?;
         validate_alert_limits(alert_eval_interval_secs, alert_lookback_secs)?;
+        validate_alert_grace(alert_resolve_grace_secs)?;
 
         Ok(Self {
             listen_addr,
@@ -109,6 +118,7 @@ impl Config {
             reboot_min_uptime_drop_secs,
             alert_eval_interval_secs,
             alert_lookback_secs,
+            alert_resolve_grace_secs,
         })
     }
 }
@@ -152,6 +162,17 @@ pub fn validate_alert_limits(interval_secs: i64, lookback_secs: i64) -> Result<(
     }
     if lookback_secs <= 0 {
         return Err("OBS_ALERT_LOOKBACK_SECS debe ser mayor que 0".to_string());
+    }
+    Ok(())
+}
+
+/*
+ * Hysteresis del bloque 5.2: la ventana de resolucion no puede ser
+ * negativa (0 = resolver apenas la condicion deja de sostenerse).
+ */
+pub fn validate_alert_grace(grace_secs: i64) -> Result<(), String> {
+    if grace_secs < 0 {
+        return Err("OBS_ALERT_RESOLVE_GRACE_SECS no puede ser negativo".to_string());
     }
     Ok(())
 }
@@ -204,5 +225,16 @@ mod tests {
         assert!(validate_alert_limits(15, 0).is_err());
         assert!(validate_alert_limits(-5, 300).is_err());
         assert!(validate_alert_limits(15, -5).is_err());
+    }
+
+    #[test]
+    fn alert_grace_accepts_zero_and_positive() {
+        assert!(validate_alert_grace(0).is_ok());
+        assert!(validate_alert_grace(60).is_ok());
+    }
+
+    #[test]
+    fn alert_grace_rejects_negative() {
+        assert!(validate_alert_grace(-1).is_err());
     }
 }

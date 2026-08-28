@@ -4,6 +4,7 @@ use sqlx::postgres::{PgPool, PgPoolOptions};
 use sqlx::FromRow;
 use uuid::Uuid;
 
+use crate::alerts::AlertOp;
 use crate::reboot::detect_reboot;
 
 /*
@@ -441,4 +442,80 @@ pub async fn recent_samples_for_rule(
     .bind(from)
     .fetch_all(pool)
     .await
+}
+
+/*
+ * Maquina de estados (bloque 5.2): el evaluador persiste el estado actual
+ * por (rule, agent) en `alerts`. Aplicacion de los pasos del ciclo en una
+ * sola transaccion: UPSERT (crear/actualizar), arrancar la ventana de
+ * resolucion (hysteresis) o borrar la fila (RESOLVED).
+ */
+
+#[derive(FromRow)]
+pub struct CurrentAlert {
+    pub rule_id: i64,
+    pub agent_id: Uuid,
+    pub state: String,
+    pub resolve_from: Option<DateTime<Utc>>,
+}
+
+pub async fn list_current_alerts(pool: &PgPool) -> Result<Vec<CurrentAlert>, sqlx::Error> {
+    sqlx::query_as::<_, CurrentAlert>(
+        "SELECT rule_id, agent_id, state, resolve_from
+         FROM alerts",
+    )
+    .fetch_all(pool)
+    .await
+}
+
+pub async fn apply_alert_steps(pool: &PgPool, ops: &[AlertOp]) -> Result<(), sqlx::Error> {
+    if ops.is_empty() {
+        return Ok(());
+    }
+    let mut tx = pool.begin().await?;
+    for op in ops {
+        match op {
+            AlertOp::Upsert {
+                rule_id,
+                agent_id,
+                state,
+                since,
+            } => {
+                sqlx::query(
+                    "INSERT INTO alerts (rule_id, agent_id, state, since, checked_at)
+                     VALUES ($1, $2, $3, $4, now())
+                     ON CONFLICT (rule_id, agent_id)
+                     DO UPDATE SET state = EXCLUDED.state,
+                                   since = EXCLUDED.since,
+                                   resolve_from = NULL,
+                                   checked_at = now()",
+                )
+                .bind(rule_id)
+                .bind(agent_id)
+                .bind(state.as_str())
+                .bind(since)
+                .execute(&mut *tx)
+                .await?;
+            }
+            AlertOp::StartResolving { rule_id, agent_id } => {
+                sqlx::query(
+                    "UPDATE alerts SET resolve_from = now(), checked_at = now()
+                     WHERE rule_id = $1 AND agent_id = $2",
+                )
+                .bind(rule_id)
+                .bind(agent_id)
+                .execute(&mut *tx)
+                .await?;
+            }
+            AlertOp::Resolved { rule_id, agent_id } => {
+                sqlx::query("DELETE FROM alerts WHERE rule_id = $1 AND agent_id = $2")
+                    .bind(rule_id)
+                    .bind(agent_id)
+                    .execute(&mut *tx)
+                    .await?;
+            }
+        }
+    }
+    tx.commit().await?;
+    Ok(())
 }
