@@ -45,12 +45,12 @@ desarrollo con commits progresivos.
       timeline del host y reboots; **7.3** alertas e historicos
       (entregado): gestion de rules y checks, alertas activas, historial
       de alertas y historial unificado con filtros. Ver detalle abajo.
-- [ ] **Fase 8 — Hardening y benchmark experimental**
+- [x] **Fase 8 — Hardening y benchmark experimental**
       TLS, rate limiting, sanitizers/fuzzing, benchmark reproducible en
       Pentium M + Alpine Linux. Subdividida en 3 bloques: **8.1** rate
       limiting por IP sobre la ingestion (entregado); **8.2** TLS nativo
       (rustls) en el collector (entregado); **8.3** sanitizers/fuzzing del
-      agent + benchmark reproducible. Ver detalle abajo.
+      agent + benchmark reproducible (entregado). Ver detalle abajo.
 
 ## Fase 1 — detalle
 
@@ -62,7 +62,7 @@ desarrollo con commits progresivos.
   arma un `obs_sample_t` cada `metrics_interval_secs` y lo imprime como
   JSON; el envío HTTPS real llega en Fase 2).
 - `agent/tests/` — `test_cpu.c`, `test_memory.c`, `test_config.c`.
-- `agent/Makefile` — targets `all`, `debug`, `sanitize`, `test`, `clean`.
+- `agent/Makefile` — targets `all`, `debug`, `sanitize`, `test`, `fuzz`, `clean`.
 - `agent/README.md`.
 - `docs/adr/0001-agent-language.md`.
 
@@ -815,11 +815,33 @@ collector** (sin reverse proxy), consistente con el informe tecnico.
     (200/200/429); cert sin key / key sin cert / PEM ilegible abortan al
     arrancar.
 
-- **Bloque 8.3 — Sanitizers/fuzzing + benchmark (pendiente):**
-  - Agent: ampliar `make sanitize` (ya hay ASan/UBSan) con LSan y correr
-    contra el parser de payloads; fuzzing del parser de URL/reponses del
-    agent (libFuzzer o un harness minimo) y del JSON de ingestion del
-    collector.
-  - Benchmark reproducible: script que levanta postgres + collector
-    (release), corre N agents simulados y mide ingestion/latencia/envio
-    en un Pentium M + Alpine como referencia.
+- **Bloque 8.3 — Sanitizers/fuzzing + benchmark (entregado):**
+  - Agent: `make sanitize` ahora compila el binario, los 12 tests y el
+    harness de fuzzing con ASan + UBSan + LSan (antes solo ASan/UBSan sobre
+    el binario), y corre los 11 unit tests + el fuzz bajo esos sanitizers.
+    Fix de fondo: las variables `TEST_BINS`/`FUZZ_BIN` se expandian antes de
+    definirse (make expande prereqs en lectura), por lo que los bins nunca
+    entraban como prereqs de `sanitize:`; se movieron al inicio del Makefile.
+    Sin `clang`/libFuzzer (solo GCC), el fuzzing se implemento como un
+    **harness minimo determinista** sin dependencias: corpus real (URLs de
+    agent, status lines, config) + mutaciones estructurales (bit flips, bytes
+    interesantes, truncados, inserciones/borrados) con RNG xorshift64 propio.
+    El harness (`tests/fuzz.c`, targets `fuzz` y `make sanitize`) recorre
+    `transport_parse_url`, `transport_parse_status_line` y
+    `config_parse_text` (expuesto via refactor de `config_load`),
+    200.000 iteraciones, invariantes de buffers; sin hallazgos.
+    Tras `sanitize` hay que `make clean` para volver a los modos normales:
+    los `.o` sanitizados no se mezclan con el link normal.
+  - Collector: fuzzing deterministico del pipeline de ingestion en
+    `models.rs` (`fuzz_metrics_pipeline_is_sound`): 50.000 iteraciones de
+    serde_json `-> MetricsPayload -> validate() -> to_metric_rows()` con el
+    mismo xorshift64, verificando valores finitos (serde_json no acepta
+    NaN/Inf), cota de filas y expansion fija de cada array. Sin hallazgos.
+  - Benchmark reproducible: `benchmarks/run_benchmark.sh` levanta postgres
+    (DB dedicada `observer_bench` efimera) + collector release y corre N
+    agents simulados (heartbeats + samples) midiendo throughput, latencia
+    (p99/p95/p50), distribucion HTTP y persistencia en `metric_samples`,
+    con fingerprint del entorno (kernel/CPU/mem/distro/toolchain/commit).
+    Correrlo en un Pentium M + Alpine da la referencia de desempeno.
+    Referencia 30s/10 agents en esta workstation: 19.3 req/s, p99 9.1ms,
+    p50 5.2ms, 100% HTTP 200, 580 filas de 10 agents.

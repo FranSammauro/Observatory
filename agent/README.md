@@ -31,13 +31,21 @@ todavía.**
 ```sh
 make            # build de release (-O2)
 make debug      # build de debug (-O0 -g)
-make sanitize   # build con AddressSanitizer + UndefinedBehaviorSanitizer
+make sanitize   # ASan + UBSan + LSan: compila binario + tests + fuzz,
+                #   corre los unit tests y 200.000 iteraciones de fuzzing
 make test       # compila y corre los tests unitarios
+make fuzz       # corre el harness de fuzzing deterministico (200.000 iters)
 make clean
 ```
 
+Tras `make sanitize`, volver a los modos normales requiere `make clean`
+(no mezclar los `.o` instrumentados con el link normal).
+
 Requiere un compilador C11 (`cc`/`gcc`/`clang`) y `make`. Sin dependencias
-externas.
+externas. El fuzzing es un surge harness mínimo (corpus real + mutación
+estructural determinista con RNG xorshift64) en `tests/fuzz.c`, sin
+`clang`/libFuzzer; recorre `transport_parse_url`,
+`transport_parse_status_line` y `config_parse_text`.
 
 ## Uso
 
@@ -157,8 +165,8 @@ Casos cubiertos (además de lo ya descripto en Fase 1):
 Validado además con una prueba de integración real (agent real +
 mock collector HTTP en Python) confirmando el flujo completo
 `collect → serialize → POST → retry` con backoff correcto ante fallos
-de conexión, y con `make sanitize` (ASan + UBSan) sin hallazgos tras
-ejercitar los paths de red reales.
+de conexión, y con `make sanitize` (ASan + UBSan + LSan) corriendo los
+suites + 200.000 iteraciones de fuzzing sin hallazgos.
 
 ## Próximos pasos (Fase 3+)
 

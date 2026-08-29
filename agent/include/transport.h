@@ -31,6 +31,10 @@ typedef struct {
 obs_status_t transport_parse_url(const char *base_url, char *host, size_t host_size,
                                   uint16_t *port, bool *is_https);
 
+/* Parsea la linea de status de una respuesta HTTP ("HTTP/1.1 200 OK...").
+ * Expuesto para fuzz/tests; false si no es una linea de status valida. */
+bool transport_parse_status_line(const char *response, int *status_code);
+
 /*
  * Hace un POST a `base_url` + `path` con el body dado (se asume JSON) y
  * el token como `Authorization: Bearer <token>` (omitido si token es

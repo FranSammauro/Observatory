@@ -194,8 +194,15 @@ static obs_status_t recv_response(int fd, char *buffer, size_t buffer_size,
     return OBS_OK;
 }
 
-static bool parse_status_line(const char *response, int *status_code)
+/*
+ * Parsea la linea de status HTTP de la respuesta ("HTTP/1.1 200 OK...")
+ * en el codigo de status. Expuesto (no static) para fuzz/tests.
+ */
+bool transport_parse_status_line(const char *response, int *status_code)
 {
+    if (!response || !status_code) {
+        return false;
+    }
     /* "HTTP/1.1 200 OK\r\n..." */
     return sscanf(response, "HTTP/%*d.%*d %d", status_code) == 1;
 }
@@ -286,7 +293,7 @@ obs_status_t transport_post(const transport_config_t *config,
     }
 
     int status_code = 0;
-    if (!parse_status_line(response, &status_code)) {
+    if (!transport_parse_status_line(response, &status_code)) {
         LOG_ERROR_(COMPONENT, "could not parse HTTP status line from response");
         return OBS_ERR_PARSE;
     }

@@ -33,4 +33,8 @@ void config_set_defaults(obs_config_t *config);
 /* Parsea un archivo de configuracion y sobreescribe los defaults. */
 obs_status_t config_load(const char *path, obs_config_t *config);
 
+/* Parsea configuracion desde un buffer en memoria (lineas '\n').
+ * Expuesto para fuzzing/tests sin tocar disco. */
+void config_parse_text(const char *text, obs_config_t *config);
+
 #endif /* OBSERVER_CONFIG_H */

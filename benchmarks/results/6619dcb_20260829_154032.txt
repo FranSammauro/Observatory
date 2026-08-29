@@ -1,0 +1,28 @@
+=== Observatory benchmark ===
+commit:     6619dcb
+fecha:      2026-08-29T18:40:32Z
+Kernel:     Linux 7.1.9-arch1-2 x86_64 GNU/Linux
+CPU model:  AMD Ryzen 5 5600G with Radeon Graphics
+CPU cores:  12
+CPU MHz:    3883.994
+Mem total:  28614708 kB
+Distro:     Arch Linux
+gcc:        gcc (GCC) 16.2.1 20260810
+rustc:      rustc 1.97.1 (8bab26f4f 2026-07-14)
+cargo:      cargo 1.97.1 (c980f4866 2026-06-30)
+Params:     duration=4s agents=3 interval=1s
+
+=== Resultados ===
+Requests totales:      24
+Duracion (respcarga):  4s
+Throughput:            6.00 req/s
+Latencia p99:          0.011702s
+Latencia p95:          0.010202s
+Latencia p50:          0.004080s
+
+Distribucion HTTP:
+  HTTP 200: 24
+
+Persistencia (postgres):
+  filas en metric_samples: 24
+  agents distintos:        3

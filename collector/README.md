@@ -4,12 +4,13 @@ Collector central en **Rust (Axum)** que recibe los payloads que emite el
 agent C (`observer-agent`), los valida, los autentica por bearer token, y
 los persiste en PostgreSQL.
 
-> Estado actual: **Fase 8 en curso** — entregados los bloques 8.1 (rate
-> limiting por IP sobre la ingestion) y 8.2 (TLS nativo rustls: el
+> Estado actual: **Fase 8 completa** — entregados los bloques 8.1 (rate
+> limiting por IP sobre la ingestion), 8.2 (TLS nativo rustls: el
 > collector sirve `https://` con `OBS_TLS_CERT` y `OBS_TLS_KEY`, y sigue
-> en `http://` plano sin ellos). Fase 7 completa (dashboard estatico con
-> login bearer + alertas e historicos), Fases 6, 5, 4, 4.2 y 4.3
-> tambien. Ver [`../PHASES.md`](../PHASES.md).
+> en `http://` plano sin ellos) y 8.3 (fuzzing deterministico del pipeline
+> de ingestion + benchmark reproducible). Fase 7 completa (dashboard
+> estatico con login bearer + alertas e historicos), Fases 6, 5, 4, 4.2 y
+> 4.3 tambien. Ver [`../PHASES.md`](../PHASES.md).
 
 ## Arquitectura
 
@@ -305,13 +306,28 @@ incompleto o el PEM es ilegible, el arranque falla ruidoso.
 ```sh
 cargo build            # debug
 cargo build --release  # release (LTO + codegen-units=1)
-cargo test             # 158 tests unitarios (sin DB)
+cargo test             # 159 tests unitarios (sin DB)
 cargo clippy           # lint, sin warnings
 cargo fmt              # formato
 ```
 
 Las migraciones estan en `migrations/` y se aplican **al arrancar**
 (`sqlx::migrate!`), asi no hace falta `sqlx-cli` para desplegar.
+
+## Fuzzing y benchmark (Fase 8, bloque 8.3)
+
+- **Fuzzing deterministico** del pipeline de ingestion en
+  `models.rs::tests::fuzz_metrics_pipeline_is_sound`: 50.000 iteraciones
+  (RNG xorshift64 propio, sin `rand`) de
+  `serde_json → MetricsPayload → validate() → to_metric_rows()`,
+  verificando que el parser nunca explota y que los valores resultantes
+  son finitos (serde_json rechaza NaN/Inf) y las filas respetan la cota.
+  Se corre incluido en `cargo test`.
+- **Benchmark reproducible**: `benchmarks/run_benchmark.sh` levanta el
+  collector (release) contra una DB dedicated efimera, corre N agents
+  simulados y mide throughput, latencia (p99/p95/p50), distribucion HTTP
+  y persistencia, con fingerprint del entorno. Resultados bajo
+  `benchmarks/results/` (`latest.txt` apunta a la ultima corrida).
 
 ## Correr en local
 

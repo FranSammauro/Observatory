@@ -79,6 +79,33 @@ static obs_status_t apply_kv(obs_config_t *config, const char *key, const char *
     return OBS_OK;
 }
 
+static obs_status_t process_config_line(obs_config_t *config, char *line,
+                                         const char *source, int line_no)
+{
+    char *trimmed = trim(line);
+    if (trimmed[0] == '\0' || trimmed[0] == '#') {
+        return OBS_OK;
+    }
+
+    char *eq = strchr(trimmed, '=');
+    if (!eq) {
+        LOG_WARN_(COMPONENT, "%s:%d: malformed line (missing '='), skipping",
+                   source, line_no);
+        return OBS_OK;
+    }
+
+    *eq = '\0';
+    char *key = trim(trimmed);
+    char *value = trim(eq + 1);
+
+    if (key[0] == '\0') {
+        LOG_WARN_(COMPONENT, "%s:%d: empty key, skipping", source, line_no);
+        return OBS_OK;
+    }
+
+    return apply_kv(config, key, value);
+}
+
 obs_status_t config_load(const char *path, obs_config_t *config)
 {
     FILE *fp = fopen(path, "r");
@@ -92,32 +119,46 @@ obs_status_t config_load(const char *path, obs_config_t *config)
 
     while (fgets(line, sizeof(line), fp)) {
         line_no++;
-
-        char *trimmed = trim(line);
-        if (trimmed[0] == '\0' || trimmed[0] == '#') {
-            continue;
-        }
-
-        char *eq = strchr(trimmed, '=');
-        if (!eq) {
-            LOG_WARN_(COMPONENT, "%s:%d: malformed line (missing '='), skipping",
-                       path, line_no);
-            continue;
-        }
-
-        *eq = '\0';
-        char *key = trim(trimmed);
-        char *value = trim(eq + 1);
-
-        if (key[0] == '\0') {
-            LOG_WARN_(COMPONENT, "%s:%d: empty key, skipping", path, line_no);
-            continue;
-        }
-
-        apply_kv(config, key, value);
+        process_config_line(config, line, path, line_no);
     }
 
     fclose(fp);
     LOG_INFO_(COMPONENT, "loaded configuration from '%s'", path);
     return OBS_OK;
+}
+
+/*
+ * Parsea configuracion desde un buffer en memoria (lineas separadas por
+ * '\n'). Expuesto (no static) para fuzzing y tests unitarios sin tocar
+ * disco: replica la semantica de config_load sobre un archivo, incluido
+ * el partido de lineas largas en chunks de OBS_MAX_LINE-1 que produce
+ * fgets. El buffer se trata como string C (un '\0' corta).
+ */
+void config_parse_text(const char *text, obs_config_t *config)
+{
+    if (!text) {
+        return;
+    }
+
+    const char *p = text;
+    int line_no = 0;
+
+    while (*p != '\0') {
+        line_no++;
+
+        char line[OBS_MAX_LINE];
+        size_t n = 0;
+        while (n < OBS_MAX_LINE - 1 && p[n] != '\0' && p[n] != '\n') {
+            n++;
+        }
+        memcpy(line, p, n);
+        line[n] = '\0';
+
+        p += n;
+        if (*p == '\n') {
+            p++;
+        }
+
+        process_config_line(config, line, "<config text>", line_no);
+    }
 }

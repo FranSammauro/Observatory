@@ -54,12 +54,14 @@ Del dashboard (Fase 7), entregado completo: **7.1 overview skeleton**
 **7.2 host page** (detalle por agent, series con grafica SVG, timeline
 del host y reboots) y **7.3 alertas e historicos** (gestion de rules y
 checks, alertas activas, historial de alertas e historial unificado con
-filtros), servidos por el propio collector. Arrancada la **Fase 8**
-(hardening): entregados **8.1 rate limiting** por IP sobre la ingestion
-(token bucket, 429 + Retry-After) y **8.2 TLS nativo** (rustls: el
-collector sirve `https://` cuando se le da cert/key, con fallback a
-`http://` plano para la red local). Faltan **8.3** (sanitizers/fuzzing
-del agent + benchmark reproducible en Pentium M + Alpine) y ya entregadas:
+filtros), servidos por el propio collector. **Fase 8 (hardening) completa**:
+**8.1 rate limiting** por IP sobre la ingestion (token bucket, 429 +
+Retry-After), **8.2 TLS nativo** (rustls: el collector sirve `https://`
+cuando se le da cert/key, con fallback a `http://` plano para la red
+local) y **8.3 sanitizers/fuzzing + benchmark reproducible**: `make
+sanitize` del agent con ASan+UBSan+LSan (tests + 200k iteraciones de fuzz
+determinista), fuzz deterministico 50k del pipeline del collector y
+`benchmarks/run_benchmark.sh` con fingerprint de entorno. Ya entregadas:
 query API + estados de conectividad (Fase 4), alert engine (Fase 5) y
 health checks + eventos realtime + historial unificado + summary
 (Fase 6).

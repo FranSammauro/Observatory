@@ -355,4 +355,137 @@ mod tests {
             .collect();
         assert!(p.validate().is_err());
     }
+
+    /* Fuzzing deterministico del pipeline de ingestion (Fase 8, bloque
+     * 8.3): JSON -> MetricsPayload -> validate() -> to_metric_rows().
+     *
+     * Sin crates de fuzzing ni dependencias de rand: un xorshift64 propio
+     * arma el corpus (payload valido real) y lo muta (bit flips, bytes
+     * "interesantes", truncados, ruido puro) contra
+     * serde_json::from_bytes::<MetricsPayload>. El parser no debe
+     * explotar (no panic / no UB) y, cuando el payload parsee y valide,
+     * to_metric_rows() debe respetar cota e invariantes (valores finitos,
+     * expansion de cada array en su conteo fijo de filas).
+     *
+     * Mismos defaults/seed => misma secuencia (benchmark reproducible).
+     * La semilla 0x9E3779B97F4A7C15 es una de las "nada magicas".
+     */
+    #[test]
+    fn fuzz_metrics_pipeline_is_sound() {
+        const ITER: u32 = 50_000;
+        let mut s: u64 = 0x9E37_79B9_7F4A_7C15;
+
+        fn next(s: &mut u64) -> u64 {
+            *s ^= *s << 13;
+            *s ^= *s >> 7;
+            *s ^= *s << 17;
+            *s
+        }
+
+        /* Genus: bytes interesantes perimetrales del JSON. */
+        const BYTES: [u8; 25] = [
+            b'"', b':', b'{', b'}', b'[', b']', b',', b'\\', b'/', b'0', b'1', b'9', b'.', b'-',
+            b'+', b'e', b'E', b'n', b'a', b'N', b' ', 0x0a, 0x00, 0x7f, 0xff,
+        ];
+
+        /* Corpus: el payload valido que el agent emite de verdad. */
+        let valid: Vec<u8> = SAMPLE.as_bytes().to_vec();
+        let mut total_ok = 0u64;
+
+        for i in 0..ITER {
+            let mut buf: Vec<u8>;
+            match next(&mut s) % 4 {
+                0 => buf = valid.clone(),
+                1 => {
+                    /* ruido puro */
+                    let n = (next(&mut s) % 300) as usize;
+                    buf = (0..n).map(|_| (next(&mut s) & 0xff) as u8).collect();
+                }
+                _ => {
+                    /* corpus + mutaciones */
+                    buf = valid.clone();
+                    let m = 1 + (next(&mut s) % 8) as usize;
+                    for _ in 0..m {
+                        if buf.is_empty() {
+                            break;
+                        }
+                        match next(&mut s) % 4 {
+                            0 => {
+                                let at = (next(&mut s) % buf.len() as u64) as usize;
+                                buf[at] ^= 1 << (next(&mut s) % 8);
+                            }
+                            1 => {
+                                let at = (next(&mut s) % buf.len() as u64) as usize;
+                                buf[at] = BYTES[(next(&mut s) % BYTES.len() as u64) as usize];
+                            }
+                            2 => {
+                                let cut = (next(&mut s) % buf.len() as u64) as usize;
+                                buf.truncate(cut);
+                            }
+                            _ => {
+                                let at = (next(&mut s) % (buf.len() as u64 + 1)) as usize;
+                                buf.insert(at, BYTES[(next(&mut s) % BYTES.len() as u64) as usize]);
+                            }
+                        }
+                    }
+                }
+            }
+
+            if let Ok(payload) = serde_json::from_slice::<MetricsPayload>(&buf) {
+                /* Se evita reclamar NaN/Inf: serde_json rechaza JSON
+                 * no estandar. Si el parse triunfa, los f64 del payload
+                 * deben ser finitos (los negativos son validos). */
+                for v in payload.metrics.values() {
+                    assert!(v.is_finite(), "metrics no finito en iter {i}");
+                }
+                for d in &payload.disk {
+                    check_finite(d.read_bytes_per_sec);
+                    check_finite(d.write_bytes_per_sec);
+                    check_finite(d.read_ops_per_sec);
+                    check_finite(d.write_ops_per_sec);
+                }
+                for n in &payload.network {
+                    check_finite(n.rx_bytes_per_sec);
+                    check_finite(n.tx_bytes_per_sec);
+                    check_finite(n.rx_packets_per_sec);
+                    check_finite(n.tx_packets_per_sec);
+                }
+                for f in &payload.filesystem {
+                    check_finite(f.utilization);
+                }
+
+                if payload.validate().is_ok() {
+                    let rows = payload.to_metric_rows();
+                    /* Cota defensiva superior: cada escalar (<= 1024)
+                     * una fila + cada entrada de array su conteo fijo
+                     * (disk 4, network 6, filesystem 3). */
+                    let cap = MAX_METRIC_KEYS
+                        + payload.disk.len() * 4
+                        + payload.network.len() * 6
+                        + payload.filesystem.len() * 3;
+                    assert!(
+                        rows.len() <= cap,
+                        "rows {} > cap {} en iter {i}",
+                        rows.len(),
+                        cap
+                    );
+                    for (_, _, v) in &rows {
+                        assert!(v.is_finite(), "row no finita en iter {i}");
+                    }
+                    total_ok += 1;
+                }
+            }
+
+            /* Solo usamos `i` para el assert; evitar warning. */
+            let _ = i;
+        }
+
+        /* El corpus valido puro (modo 0) debe haber sido aceptado al menos
+         * una vez; si nunca parsea, el test esta roto, no el parser. */
+        assert!(total_ok > 0, "el corpus valido jamas fue aceptado");
+    }
+
+    fn check_finite(v: f64) {
+        assert!(v.is_finite(), "valor no finito: {v}");
+    }
 }
