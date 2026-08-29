@@ -5,6 +5,7 @@ use sqlx::FromRow;
 use uuid::Uuid;
 
 use crate::alerts::AlertOp;
+use crate::health::{CheckOutcome, CurrentCheckState, StateUpdate};
 use crate::reboot::detect_reboot;
 
 /*
@@ -628,6 +629,206 @@ pub async fn list_alert_history(
     .bind(rule_id)
     .bind(from)
     .bind(to)
+    .bind(limit)
+    .fetch_all(pool)
+    .await
+}
+
+/*
+ * Health checks (Fase 6, bloque 6.1): definiciones, resultados y estado
+ * actual. Una corrida es un INSERT en `health_check_results` + UPSERT de
+ * `health_check_states` (transicion up/down calculada en health::next_state,
+ * con `since` conservado mientras no cambie), en una sola transaccion.
+ */
+
+#[derive(Debug, FromRow)]
+pub struct HealthCheckRow {
+    pub id: i64,
+    pub name: String,
+    pub kind: String,
+    pub target: String,
+    pub interval_secs: i64,
+    pub timeout_secs: i64,
+    pub enabled: bool,
+    pub created_at: DateTime<Utc>,
+}
+
+pub async fn list_enabled_checks(pool: &PgPool) -> Result<Vec<HealthCheckRow>, sqlx::Error> {
+    sqlx::query_as::<_, HealthCheckRow>(
+        "SELECT id, name, kind, target, interval_secs, timeout_secs, enabled, created_at
+         FROM health_checks
+         WHERE enabled
+         ORDER BY id",
+    )
+    .fetch_all(pool)
+    .await
+}
+
+pub async fn list_health_checks(pool: &PgPool) -> Result<Vec<HealthCheckView>, sqlx::Error> {
+    sqlx::query_as::<_, HealthCheckView>(
+        "SELECT c.id, c.name, c.kind, c.target, c.interval_secs, c.timeout_secs,
+                c.enabled, c.created_at,
+                s.state, s.since, s.last_checked_at, s.last_ok, s.last_latency_ms,
+                s.last_detail
+         FROM health_checks c
+         LEFT JOIN health_check_states s ON s.check_id = c.id
+         ORDER BY c.id",
+    )
+    .fetch_all(pool)
+    .await
+}
+
+pub async fn get_health_check(
+    pool: &PgPool,
+    check_id: i64,
+) -> Result<Option<HealthCheckRow>, sqlx::Error> {
+    sqlx::query_as::<_, HealthCheckRow>(
+        "SELECT id, name, kind, target, interval_secs, timeout_secs, enabled, created_at
+         FROM health_checks
+         WHERE id = $1",
+    )
+    .bind(check_id)
+    .fetch_optional(pool)
+    .await
+}
+
+pub async fn create_health_check(
+    pool: &PgPool,
+    draft: &crate::health::CheckDraft,
+) -> Result<HealthCheckRow, sqlx::Error> {
+    sqlx::query_as::<_, HealthCheckRow>(
+        "INSERT INTO health_checks (name, kind, target, interval_secs, timeout_secs, enabled)
+         VALUES ($1, $2, $3, $4, $5, $6)
+         RETURNING id, name, kind, target, interval_secs, timeout_secs, enabled, created_at",
+    )
+    .bind(&draft.name)
+    .bind(draft.kind.as_str())
+    .bind(&draft.target)
+    .bind(draft.interval_secs)
+    .bind(draft.timeout_secs)
+    .bind(draft.enabled)
+    .fetch_one(pool)
+    .await
+}
+
+pub async fn delete_health_check(pool: &PgPool, check_id: i64) -> Result<bool, sqlx::Error> {
+    let res = sqlx::query("DELETE FROM health_checks WHERE id = $1")
+        .bind(check_id)
+        .execute(pool)
+        .await?;
+    Ok(res.rows_affected() > 0)
+}
+
+pub async fn get_check_state(
+    pool: &PgPool,
+    check_id: i64,
+) -> Result<Option<CurrentCheckState>, sqlx::Error> {
+    sqlx::query_as::<_, CurrentCheckState>(
+        "SELECT state, since
+         FROM health_check_states
+         WHERE check_id = $1",
+    )
+    .bind(check_id)
+    .fetch_optional(pool)
+    .await
+}
+
+/*
+ * Ultima corrida por check, para el scheduler calcula el vencimiento.
+ */
+pub async fn latest_check_times(
+    pool: &PgPool,
+) -> Result<std::collections::HashMap<i64, DateTime<Utc>>, sqlx::Error> {
+    let rows: Vec<(i64, DateTime<Utc>)> =
+        sqlx::query_as("SELECT check_id, MAX(ts) FROM health_check_results GROUP BY check_id")
+            .fetch_all(pool)
+            .await?;
+    Ok(rows.into_iter().collect())
+}
+
+pub async fn apply_check_outcome(
+    pool: &PgPool,
+    check_id: i64,
+    outcome: &CheckOutcome,
+    update: &StateUpdate,
+) -> Result<(), sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO health_check_results (check_id, ts, ok, latency_ms, detail)
+         VALUES ($1, now(), $2, $3, $4)",
+    )
+    .bind(check_id)
+    .bind(outcome.ok)
+    .bind(outcome.latency_ms)
+    .bind(&outcome.detail)
+    .execute(&mut *tx)
+    .await?;
+
+    sqlx::query(
+        "INSERT INTO health_check_states
+             (check_id, state, since, last_checked_at, last_ok, last_latency_ms, last_detail)
+         VALUES ($1, $2, $3, now(), $4, $5, $6)
+         ON CONFLICT (check_id) DO UPDATE SET
+             state = EXCLUDED.state,
+             since = EXCLUDED.since,
+             last_checked_at = EXCLUDED.last_checked_at,
+             last_ok = EXCLUDED.last_ok,
+             last_latency_ms = EXCLUDED.last_latency_ms,
+             last_detail = EXCLUDED.last_detail",
+    )
+    .bind(check_id)
+    .bind(update.state)
+    .bind(update.since)
+    .bind(outcome.ok)
+    .bind(outcome.latency_ms)
+    .bind(&outcome.detail)
+    .execute(&mut *tx)
+    .await?;
+
+    tx.commit().await
+}
+
+#[derive(Serialize, FromRow)]
+pub struct HealthCheckView {
+    pub id: i64,
+    pub name: String,
+    pub kind: String,
+    pub target: String,
+    pub interval_secs: i64,
+    pub timeout_secs: i64,
+    pub enabled: bool,
+    pub created_at: DateTime<Utc>,
+    pub state: Option<String>,
+    pub since: Option<DateTime<Utc>>,
+    pub last_checked_at: Option<DateTime<Utc>>,
+    pub last_ok: Option<bool>,
+    pub last_latency_ms: Option<i64>,
+    pub last_detail: Option<String>,
+}
+
+#[derive(Serialize, FromRow)]
+pub struct HealthResultRow {
+    pub id: i64,
+    pub check_id: i64,
+    pub ts: DateTime<Utc>,
+    pub ok: bool,
+    pub latency_ms: i64,
+    pub detail: String,
+}
+
+pub async fn list_health_results(
+    pool: &PgPool,
+    check_id: i64,
+    limit: i64,
+) -> Result<Vec<HealthResultRow>, sqlx::Error> {
+    sqlx::query_as::<_, HealthResultRow>(
+        "SELECT id, check_id, ts, ok, latency_ms, detail
+         FROM health_check_results
+         WHERE check_id = $1
+         ORDER BY ts DESC, id DESC
+         LIMIT $2",
+    )
+    .bind(check_id)
     .bind(limit)
     .fetch_all(pool)
     .await

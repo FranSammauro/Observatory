@@ -29,7 +29,12 @@ desarrollo con commits progresivos.
       (entregado), **5.3** deduplicación + historial + query API
       (entregado). Ver detalle abajo.
 - [ ] **Fase 6 — Health checks + WebSocket**
-      Checks HTTP/TCP, eventos realtime.
+      Checks HTTP/TCP, eventos realtime. Subdividida en 3 bloques:
+      **6.1** health checks HTTP/TCP (definiciones + ejecutor +
+      resultados + estado + query API, entregado), **6.2** WebSocket de
+      eventos realtime (canal + publication desde alertas y health
+      checks), **6.3** historial unificado + summary de salud +
+      eventos de conectividad. Ver detalle abajo.
 - [ ] **Fase 7 — Dashboard**
       Overview, host page, alertas, históricos.
 - [ ] **Fase 8 — Hardening y benchmark experimental**
@@ -437,3 +442,91 @@ desarrollo con commits progresivos.
     2/2/3 eventos, todos `DISTINCT (from_state, to_state)`); `alerts`
     vacia al final.
   - 87 tests en verde, build/clippy/fmt limpios.
+
+## Fase 6 — detalle
+
+**Subdivision en 3 bloques:**
+
+- **Bloque 6.1 — Health checks HTTP/TCP (entregado):**
+  - Migracion `0006_health_checks.sql`: tablas `health_checks` (`name`
+    UNIQUE, `kind` `http|tcp` con CHECK, `target`, `interval_secs` >= 1,
+    `timeout_secs` >= 1, `enabled`), `health_check_results` (una fila por
+    corrida: `ts`, `ok`, `latency_ms`, `detail`, FK CASCADE, indice
+    `(check_id, ts)` desc) y `health_check_states` (estado actual por PK
+    `check_id`: `state` `up|down`, `since`, `last_checked_at`,
+    `last_ok`, `last_latency_ms`, `last_detail`).
+  - `src/health.rs`:
+    - `parse_target` — valida el target segun `kind` y devuelve
+      `ParsedTarget` (diagrama host/puerto/ruta): http
+      `http://host[:puerto]/ruta` (el esquema `https://` se rechaza por
+      ahora — TLS llega en la Fase 8 —, puerto 0 o > 65535 invalido),
+      tcp `host:puerto` (default port 0 invalido).
+    - `probe` — HTTP: GET minimal sobre `tokio::net::TcpStream` (sin
+      dependencias nuevas): request `GET <path> HTTP/1.1` +
+      `Host` y `Connection: close`, el check es ok si la respuesta es
+      2xx/3xx; TCP: exito de conexion = ok. Timeout global
+      (`timeout_secs`, default `OBS_HEALTH_DEFAULT_TIMEOUT_SECS`).
+    - `next_state` — maquina de estados pura `up|down`: conserva `since`
+      mientras no cambia y la renueva con `ts` en la transicion.
+    - `spawn_health_runner`/`run_cycle` — task de tokio que cada
+      `OBS_HEALTH_POLL_SECS` (default 1s) corre los checks habilitados
+      y vencidos (ultima corrida + `interval_secs` <= ahora; checks sin
+      corridas corren al arrancar). Cada corrida persiste en una
+      transaccion: INSERT del resultado + UPSERT del estado.
+  - `src/db.rs`: `list_enabled_checks`, `list_health_checks` (LEFT JOIN
+    con estados -> vista con temporales `null` si nunca corrio),
+    `get_health_check`, `create_health_check`, `delete_health_check`
+    (CASCADE), `get_check_state`, `latest_check_times`,
+    `apply_check_outcome` (transaccion), `list_health_results`.
+  - API (mismo bearer token):
+    - `POST /api/v1/health/checks` — `{name, kind, target,
+      interval_secs, timeout_secs?, enabled?}`; 201 con el check;
+      errores 400 con codigos `check_already_exists` (UNIQUE),
+      `invalid_check_kind`, `invalid_check_interval` (1..=86400),
+      `invalid_check_timeout` (1..=300), `invalid_check_target`;
+      `timeout_secs` default desde `OBS_HEALTH_DEFAULT_TIMEOUT_SECS`.
+    - `GET /api/v1/health/checks` — lista con estado derivado
+      (`state`/`since`/`last_*`).
+    - `DELETE /api/v1/health/checks/{check_id}` — 404 `unknown_check`,
+      400 `invalid_check_id`.
+    - `GET /api/v1/health/checks/{check_id}/results` — historial desc
+      `{ts, ok, latency_ms, detail}`; `limit` 1..=1000
+      (`DEFAULT_HEALTH_RESULTS_LIMIT=50`, `MAX_HEALTH_RESULTS_LIMIT=1000`);
+      404 `unknown_check` si no existe.
+  - `src/config.rs`: `OBS_HEALTH_POLL_SECS` (>= 1) y
+    `OBS_HEALTH_DEFAULT_TIMEOUT_SECS` (1..=300), validados al arrancar
+    (fail-fast, filosofia ADR-0002/0003); constantes de limites de
+    historial. `src/query.rs`: `CheckResultsQuery` + `into_limit`.
+  - Tests unitarios: parseo de targets, armado del request y parseo de
+    status line HTTP, maquina up/down, validacion de drafts, config y
+    query (22 nuevos; **109 en total**).
+  - Checks con `enabled = false` no se corren y quedan sin estado
+    (`state: null`). Los checks sin corridas todavia corren al tercer
+    `interval_secs` desde su creacion (arranque inmediato).
+
+**Validado en este entorno (bloque 6.1):**
+
+- Postgres real + collector con `OBS_HEALTH_POLL_SECS=1` y target HTTP
+  `python3 -m http.server` local (polo 8091):
+  - Creacion 201 (http 200, http 404, tcp a puerto abierto 55432, tcp a
+    puerto cerrado, `http-root` contra `/`). `tcp-disabled` con
+    `enabled=false` -> sin estado (`state: null`) y sin corridas.
+  - Estados: `http-root` (200) -> up, `http-up` (404) -> down con
+    `detail: HTTP 404`, `pg-port` (55432) -> up "conectado",
+    `http-refused`/`tcp-closed` -> down "Connection refused".
+    `since` = hora de la transicion; `last_ok`/`last_latency_ms`/
+    `last_detail` poblados.
+  - Transiciones en vivo: apagando el servidor `http-root` -> down
+    (refused), restaurandolo -> up, con `since` renovado en cada flip.
+  - Historial: `?limit=4` devuelve las ultimas corridas desc (mixed
+    ok/down con sus detalles); `?limit=9999` -> 400 `invalid_limit`.
+  - Negativos: duplicado -> 400 `check_already_exists`; kind gopher ->
+    400 `invalid_check_kind`; `https://` -> 400 `invalid_check_target`
+    (menciona la Fase 8); interval 0 / 86401 -> 400
+    `invalid_check_interval`; timeout 0 -> 400 `invalid_check_timeout`;
+    delete/list de id 999 -> 404 `unknown_check`; `check_id=abc` -> 400
+    `invalid_check_id`; sin token -> 401; payload sin `name`/campo ->
+    400 `invalid_check` (missing field).
+  - Delete con CASCADE: borrado el check 2, sus resultados y estado
+    desaparecen del listado.
+  - 109 tests en verde, build/clippy/fmt limpios.

@@ -18,8 +18,9 @@ use crate::auth::check_bearer;
 use crate::config::Config;
 use crate::db;
 use crate::error::ApiError;
+use crate::health::CreateHealthCheck;
 use crate::models::{HeartbeatPayload, MetricsPayload, Validate};
-use crate::query::{AlertsQuery, HistoryQuery, RebootsQuery, SeriesQuery};
+use crate::query::{AlertsQuery, CheckResultsQuery, HistoryQuery, RebootsQuery, SeriesQuery};
 use crate::state::{connectivity_state, StateLimits};
 use crate::validation::{utc_from_unix_ts, TimeLimits};
 
@@ -58,6 +59,16 @@ pub fn build_router(state: AppState) -> Router {
         )
         .route("/api/v1/alerts", get(list_alerts_handler))
         .route("/api/v1/alerts/history", get(alert_history_handler))
+        .route("/api/v1/health/checks", get(list_checks_handler))
+        .route("/api/v1/health/checks", post(create_check_handler))
+        .route(
+            "/api/v1/health/checks/{check_id}",
+            delete(delete_check_handler),
+        )
+        .route(
+            "/api/v1/health/checks/{check_id}/results",
+            get(check_results_handler),
+        )
         .layer(DefaultBodyLimit::max(state.config.max_body_bytes))
         .with_state(state)
 }
@@ -391,6 +402,140 @@ async fn alert_history_handler(
     .await?;
     tracing::debug!(n = events.len(), "query: historial de alertas");
     Ok(Json(json!({"events": events, "count": events.len()})))
+}
+
+/*
+ * Health checks (Fase 6, bloque 6.1): creacion, listado con estado,
+ * borrado e historial de corridas. Mismo bearer token que el resto.
+ */
+
+async fn create_check_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<impl IntoResponse> {
+    check_bearer(&headers, &state.config.auth_token)?;
+
+    let payload: CreateHealthCheck = serde_json::from_slice(&body).map_err(|e| {
+        ApiError::bad_request("invalid_check", format!("payload de check invalido: {e}"))
+    })?;
+    let draft = payload.into_draft(state.config.health_default_timeout_secs)?;
+
+    let row = db::create_health_check(&state.pool, &draft)
+        .await
+        .map_err(check_create_err)?;
+
+    tracing::info!(id = row.id, check = %row.name, "health check creado");
+    Ok((StatusCode::CREATED, Json(check_json(&row))))
+}
+
+async fn list_checks_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<impl IntoResponse> {
+    check_bearer(&headers, &state.config.auth_token)?;
+
+    let checks = db::list_health_checks(&state.pool).await?;
+    let body: Vec<_> = checks.iter().map(check_view_json).collect();
+    tracing::debug!(n = body.len(), "query: health checks");
+    Ok(Json(json!({"checks": body, "count": body.len()})))
+}
+
+async fn delete_check_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(check_id): Path<String>,
+) -> Result<impl IntoResponse> {
+    check_bearer(&headers, &state.config.auth_token)?;
+
+    let check_id: i64 = check_id
+        .trim()
+        .parse()
+        .map_err(|_| ApiError::bad_request("invalid_check_id", "check_id debe ser un entero"))?;
+
+    if !db::delete_health_check(&state.pool, check_id).await? {
+        return Err(ApiError::not_found("unknown_check", "check no encontrado"));
+    }
+
+    tracing::info!(check_id, "health check borrado");
+    Ok(Json(json!({"status": "ok"})))
+}
+
+async fn check_results_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(check_id): Path<String>,
+    params: std::result::Result<Query<CheckResultsQuery>, QueryRejection>,
+) -> Result<impl IntoResponse> {
+    check_bearer(&headers, &state.config.auth_token)?;
+
+    let check_id: i64 = check_id
+        .trim()
+        .parse()
+        .map_err(|_| ApiError::bad_request("invalid_check_id", "check_id debe ser un entero"))?;
+
+    if db::get_health_check(&state.pool, check_id).await?.is_none() {
+        return Err(ApiError::not_found("unknown_check", "check no encontrado"));
+    }
+
+    let limit = params
+        .map_err(|_| ApiError::bad_request("invalid_query", "parametros de query invalidos"))?
+        .0
+        .into_limit()?;
+
+    let results = db::list_health_results(&state.pool, check_id, limit).await?;
+    tracing::debug!(check_id, n = results.len(), "query: resultados de check");
+    Ok(Json(
+        json!({"check_id": check_id, "results": results, "count": results.len()}),
+    ))
+}
+
+/*
+ * "name" tiene UNIQUE en la DB: un duplicado es un 400 explicito, no un
+ * 500. Cualquier otro error sqlx se propaga como internal_error.
+ */
+fn check_create_err(e: sqlx::Error) -> ApiError {
+    if let sqlx::Error::Database(db) = &e {
+        if db.is_unique_violation() {
+            return ApiError::bad_request(
+                "check_already_exists",
+                "ya existe un check con ese nombre",
+            );
+        }
+    }
+    e.into()
+}
+
+fn check_json(row: &db::HealthCheckRow) -> serde_json::Value {
+    json!({
+        "id": row.id,
+        "name": row.name,
+        "kind": row.kind,
+        "target": row.target,
+        "interval_secs": row.interval_secs,
+        "timeout_secs": row.timeout_secs,
+        "enabled": row.enabled,
+        "created_at": row.created_at,
+    })
+}
+
+fn check_view_json(view: &db::HealthCheckView) -> serde_json::Value {
+    json!({
+        "id": view.id,
+        "name": view.name,
+        "kind": view.kind,
+        "target": view.target,
+        "interval_secs": view.interval_secs,
+        "timeout_secs": view.timeout_secs,
+        "enabled": view.enabled,
+        "created_at": view.created_at,
+        "state": view.state,
+        "since": view.since,
+        "last_checked_at": view.last_checked_at,
+        "last_ok": view.last_ok,
+        "last_latency_ms": view.last_latency_ms,
+        "last_detail": view.last_detail,
+    })
 }
 
 async fn delete_rule_handler(

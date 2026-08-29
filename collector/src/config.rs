@@ -23,6 +23,11 @@ pub const MAX_REBOOTS_LIMIT: i64 = 1_000;
 pub const DEFAULT_ALERT_HISTORY_LIMIT: i64 = 50;
 pub const MAX_ALERT_HISTORY_LIMIT: i64 = 1_000;
 
+/* Timeline de health checks (Fase 6, bloque 6.1): una corrida por
+ * intervalo, eventos de tamano acotado; mismo criterio que reboots. */
+pub const DEFAULT_HEALTH_RESULTS_LIMIT: i64 = 50;
+pub const MAX_HEALTH_RESULTS_LIMIT: i64 = 1_000;
+
 /* Evaluador de alertas (bloque 5.1): cada cuanto evaluar las reglas y
  * que ventana de `metric_samples` mirar. El intervalo es ~el periodo de
  * metricas del agent (10s); 15s da 1.5 evaluaciones por muestra. El
@@ -50,6 +55,8 @@ pub struct Config {
     pub alert_eval_interval_secs: i64,
     pub alert_lookback_secs: i64,
     pub alert_resolve_grace_secs: i64,
+    pub health_poll_secs: i64,
+    pub health_default_timeout_secs: i64,
 }
 
 fn parse_u32(name: &str, default: u32) -> Result<u32, String> {
@@ -104,11 +111,15 @@ impl Config {
         let alert_eval_interval_secs = parse_i64("OBS_ALERT_EVAL_INTERVAL_SECS", 15)?;
         let alert_lookback_secs = parse_i64("OBS_ALERT_LOOKBACK_SECS", 300)?;
         let alert_resolve_grace_secs = parse_i64("OBS_ALERT_RESOLVE_GRACE_SECS", 60)?;
+        let health_poll_secs = parse_i64("OBS_HEALTH_POLL_SECS", 1)?;
+        let health_default_timeout_secs = parse_i64("OBS_HEALTH_DEFAULT_TIMEOUT_SECS", 5)?;
 
         validate_state_limits(state_online_secs, state_degraded_secs)?;
         validate_reboot_drop(reboot_min_uptime_drop_secs)?;
         validate_alert_limits(alert_eval_interval_secs, alert_lookback_secs)?;
         validate_alert_grace(alert_resolve_grace_secs)?;
+        validate_health_poll(health_poll_secs)?;
+        validate_health_timeout(health_default_timeout_secs)?;
 
         Ok(Self {
             listen_addr,
@@ -124,6 +135,8 @@ impl Config {
             alert_eval_interval_secs,
             alert_lookback_secs,
             alert_resolve_grace_secs,
+            health_poll_secs,
+            health_default_timeout_secs,
         })
     }
 }
@@ -178,6 +191,26 @@ pub fn validate_alert_limits(interval_secs: i64, lookback_secs: i64) -> Result<(
 pub fn validate_alert_grace(grace_secs: i64) -> Result<(), String> {
     if grace_secs < 0 {
         return Err("OBS_ALERT_RESOLVE_GRACE_SECS no puede ser negativo".to_string());
+    }
+    Ok(())
+}
+
+/*
+ * Health checks (Fase 6, bloque 6.1): el scheduler no puede tener paso 0
+ * y el timeout default de un check tiene que ser positivo y acotado.
+ */
+pub fn validate_health_poll(poll_secs: i64) -> Result<(), String> {
+    if poll_secs < 1 {
+        return Err("OBS_HEALTH_POLL_SECS debe ser mayor o igual a 1".to_string());
+    }
+    Ok(())
+}
+
+pub fn validate_health_timeout(timeout_secs: i64) -> Result<(), String> {
+    if !(1..=300).contains(&timeout_secs) {
+        return Err(
+            "OBS_HEALTH_DEFAULT_TIMEOUT_SECS debe estar entre 1 y 300 segundos".to_string(),
+        );
     }
     Ok(())
 }
@@ -241,5 +274,31 @@ mod tests {
     #[test]
     fn alert_grace_rejects_negative() {
         assert!(validate_alert_grace(-1).is_err());
+    }
+
+    #[test]
+    fn health_poll_accepts_positive() {
+        assert!(validate_health_poll(1).is_ok());
+        assert!(validate_health_poll(5).is_ok());
+    }
+
+    #[test]
+    fn health_poll_rejects_zero_and_negative() {
+        assert!(validate_health_poll(0).is_err());
+        assert!(validate_health_poll(-1).is_err());
+    }
+
+    #[test]
+    fn health_timeout_accepts_bounds() {
+        assert!(validate_health_timeout(1).is_ok());
+        assert!(validate_health_timeout(5).is_ok());
+        assert!(validate_health_timeout(300).is_ok());
+    }
+
+    #[test]
+    fn health_timeout_rejects_out_of_range() {
+        assert!(validate_health_timeout(0).is_err());
+        assert!(validate_health_timeout(301).is_err());
+        assert!(validate_health_timeout(-5).is_err());
     }
 }

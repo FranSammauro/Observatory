@@ -3,6 +3,7 @@ mod auth;
 mod config;
 mod db;
 mod error;
+mod health;
 mod models;
 mod query;
 mod reboot;
@@ -62,6 +63,7 @@ async fn main() {
         config: Arc::new(config),
     };
     alerts::spawn_evaluator(state.pool.clone(), Arc::clone(&state.config));
+    health::spawn_health_runner(state.pool.clone(), Arc::clone(&state.config));
     let app = build_router(state);
 
     tracing::info!("collector listening on {}", listener.local_addr().unwrap());

@@ -3,8 +3,9 @@ use serde::Deserialize;
 use uuid::Uuid;
 
 use crate::config::{
-    DEFAULT_ALERT_HISTORY_LIMIT, DEFAULT_REBOOTS_LIMIT, DEFAULT_SERIES_POINTS,
-    MAX_ALERT_HISTORY_LIMIT, MAX_REBOOTS_LIMIT, MAX_SERIES_POINTS,
+    DEFAULT_ALERT_HISTORY_LIMIT, DEFAULT_HEALTH_RESULTS_LIMIT, DEFAULT_REBOOTS_LIMIT,
+    DEFAULT_SERIES_POINTS, MAX_ALERT_HISTORY_LIMIT, MAX_HEALTH_RESULTS_LIMIT, MAX_REBOOTS_LIMIT,
+    MAX_SERIES_POINTS,
 };
 use crate::error::ApiError;
 
@@ -208,6 +209,21 @@ impl HistoryQuery {
             to,
             limit,
         })
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CheckResultsQuery {
+    pub limit: Option<i64>,
+}
+
+impl CheckResultsQuery {
+    pub fn into_limit(self) -> Result<i64, ApiError> {
+        parse_limit(
+            self.limit,
+            DEFAULT_HEALTH_RESULTS_LIMIT,
+            MAX_HEALTH_RESULTS_LIMIT,
+        )
     }
 }
 
@@ -456,5 +472,20 @@ mod tests {
         .into_filter()
         .unwrap();
         assert_eq!(f.limit, MAX_ALERT_HISTORY_LIMIT);
+    }
+
+    #[test]
+    fn check_results_default_limit() {
+        let l = CheckResultsQuery { limit: None }.into_limit().unwrap();
+        assert_eq!(l, DEFAULT_HEALTH_RESULTS_LIMIT);
+    }
+
+    #[test]
+    fn check_results_limit_above_max_is_rejected() {
+        let r = CheckResultsQuery {
+            limit: Some(MAX_HEALTH_RESULTS_LIMIT + 1),
+        }
+        .into_limit();
+        assert!(r.is_err());
     }
 }

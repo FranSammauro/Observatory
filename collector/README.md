@@ -4,10 +4,9 @@ Collector central en **Rust (Axum)** que recibe los payloads que emite el
 agent C (`observer-agent`), los valida, los autentica por bearer token, y
 los persiste en PostgreSQL.
 
-> Estado actual: **Fase 5** (entregada) — alert engine completo: reglas
-> declarativas y evaluador (5.1), maquina de estados con hysteresis (5.2)
-> y deduplicacion + historial + query API (5.3). Fases 4, 4.2 y 4.3
-> tambien entregadas. Ver [`../PHASES.md`](../PHASES.md).
+> Estado actual: **Fase 6** (en curso) — health checks HTTP/TCP (6.1,
+> entregado). Fase 5 entera entregada (alert engine: 5.1, 5.2 y 5.3) y
+> Fases 4, 4.2 y 4.3 tambien. Ver [`../PHASES.md`](../PHASES.md).
 
 ## Arquitectura
 
@@ -109,6 +108,44 @@ la misma transaccion que aplica el estado: idempotente, sin duplicar
 creaciones/promociones/resoluciones aunque el evaluador corra de nuevo
 sobre la misma alerta.
 
+Health checks (Fase 6, bloque 6.1) — checks HTTP/TCP definidos
+declarativamente, evaluados por el propio collector, mismo bearer token:
+
+- `POST /api/v1/health/checks` — crear un check. Payload
+  `{name, kind, target, interval_secs, timeout_secs?, enabled?}` con
+  `kind` en `http|tcp`:
+  - `http`: target `http://host[:port]/ruta` (GET minimal, ok si responde
+    2xx/3xx). El esquema `https://` se rechaza por ahora (TLS llega en la
+    Fase 8).
+  - `tcp`: target `host:puerto` (ok si el puerto acepta conexion).
+  - `interval_secs` entre 1 y 86400 (obligatorio); `timeout_secs` entre 1
+    y 300 (default `OBS_HEALTH_DEFAULT_TIMEOUT_SECS`, 5s); `enabled`
+    default true.
+  - `201` con el check creado; `400 check_already_exists` si el `name` ya
+    existe (UNIQUE), `400 invalid_check_kind` / `invalid_check_interval`
+    / `invalid_check_timeout` / `invalid_check_target` segun el campo
+    invalido.
+- `GET /api/v1/health/checks` — lista de checks (con su **estado
+  simple) con su **estado derivado** (`state` `up|down|null`, `since`,
+  `last_checked_at`, `last_ok`, `last_latency_ms`, `last_detail`).
+- `DELETE /api/v1/health/checks/{check_id}` — borrar un check; `404
+  unknown_check` / `400 invalid_check_id`. Sus resultados y estado se
+  limpian (FK ON DELETE CASCADE).
+- `GET /api/v1/health/checks/{check_id}/results` — historial de corridas
+  ordenado DESC: `{check_id, results[], count}` con `{ts, ok,
+  latency_ms, detail}`. Query param `limit` (default 50, tope 1000);
+  `404 unknown_check` si el check no existe.
+
+Evaluacion (bloque 6.1): el runner (`health::spawn_health_runner`, en
+una tarea tokio) consulta cada `OBS_HEALTH_POLL_SECS` los checks
+habilitados y corre los que estan vencidos (`interval_secs`). Un probe
+HTTP es un GET minimal sobre `TcpStream` `tokio` (sin dependencias
+nuevas, mismo espiritu que el transport.c del agent); `Connection:
+close` y lectura del status line. La maquina de estados `up|down`
+(`health::next_state`, pura) conserva `since` mientras no cambia y en
+cada corrida se persiste en una transaccion: INSERT del resultado +
+UPSERT del estado. Los checks con `enabled = false` no se corren.
+
 Contrato de payloads: ver [`../agent/src/protocol.c`](../agent/src/protocol.c)
 (serializador del agent) y [`../docs/adr/0003-collector-ingestion.md`]
 (../docs/adr/0003-collector-ingestion.md) para las decisiones de diseno.
@@ -135,6 +172,8 @@ Contrato de payloads: ver [`../agent/src/protocol.c`](../agent/src/protocol.c)
 | `OBS_ALERT_EVAL_INTERVAL_SECS` | `15` | periodo del evaluador de alertas (bloque 5.1) |
 | `OBS_ALERT_LOOKBACK_SECS` | `300` | ventana de muestras que el evaluador consulta por regla (bloque 5.1) |
 | `OBS_ALERT_RESOLVE_GRACE_SECS` | `60` | ventana de hysteresis de una alerta FIRING (bloque 5.2); 0 = resolucion inmediata, no puede ser negativa |
+| `OBS_HEALTH_POLL_SECS` | `1` | periodo del runner de health checks (bloque 6.1) |
+| `OBS_HEALTH_DEFAULT_TIMEOUT_SECS` | `5` | timeout por defecto de un check (1-300), si el payload no trae `timeout_secs` (bloque 6.1) |
 | `RUST_LOG` | `info` | nivel de log (tracing) |
 
 ## Build y tests
@@ -142,7 +181,7 @@ Contrato de payloads: ver [`../agent/src/protocol.c`](../agent/src/protocol.c)
 ```sh
 cargo build            # debug
 cargo build --release  # release (LTO + codegen-units=1)
-cargo test             # 87 tests unitarios (sin DB)
+cargo test             # 109 tests unitarios (sin DB)
 cargo clippy           # lint, sin warnings
 cargo fmt              # formato
 ```
@@ -190,6 +229,16 @@ agent_token = tu-token
 - `alert_events` — historial de transiciones (bloque 5.3): una fila por
   transicion real (`from_state`/`to_state`/`ts`); FK a `alert_rules`
   con ON DELETE CASCADE.
+- `health_checks` — checks declarativos (bloque 6.1): `name` UNIQUE,
+  `kind` (`http|tcp` con CHECK), `target`, `interval_secs`,
+  `timeout_secs`, `enabled`.
+- `health_check_results` — una fila por corrida (bloque 6.1): `ts`,
+  `ok`, `latency_ms`, `detail`; FK a `health_checks` con ON DELETE
+  CASCADE, indice por `(check_id, ts)`.
+- `health_check_states` — estado **actual** del check (bloque 6.1),
+  deduplicado por PK `check_id`: `state` (`up|down`), `since`,
+  `last_checked_at`, `last_ok`, `last_latency_ms`, `last_detail`.
+  INACTIVO = ausencia de fila (no corrió aun o `enabled = false`).
 
 ## Limites de cardinalidad
 
