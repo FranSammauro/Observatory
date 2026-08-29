@@ -24,6 +24,15 @@ pub fn check_bearer(headers: &HeaderMap, expected: &str) -> Result<(), ApiError>
         .strip_prefix("Bearer ")
         .ok_or_else(ApiError::unauthorized)?;
 
+    check_bearer_str(token, expected)
+}
+
+/*
+ * La misma comparacion pero sobre un token ya extraido: la usa el
+ * WebSocket (6.2), donde el cliente puede pasar el token por query param
+ * (el API de WebSocket de un navegador no deja setear headers).
+ */
+pub fn check_bearer_str(token: &str, expected: &str) -> Result<(), ApiError> {
     if constant_time_eq(token.as_bytes(), expected.as_bytes()) {
         Ok(())
     } else {
@@ -86,6 +95,17 @@ mod tests {
     fn rejects_wrong_len_token() {
         let h = headers_with(&[(AUTHORIZATION.as_str(), "Bearer short")]);
         assert!(check_bearer(&h, "secret-token").is_err());
+    }
+
+    #[test]
+    fn auth_str_accepts_correct_token() {
+        assert!(check_bearer_str("secret-token", "secret-token").is_ok());
+    }
+
+    #[test]
+    fn auth_str_rejects_wrong_token() {
+        assert!(check_bearer_str("other", "secret-token").is_err());
+        assert!(check_bearer_str("", "secret-token").is_err());
     }
 
     #[test]

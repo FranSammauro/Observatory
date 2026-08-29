@@ -10,6 +10,7 @@ use tokio::net::TcpStream;
 use crate::config::Config;
 use crate::db;
 use crate::error::ApiError;
+use crate::events::EventBus;
 
 /*
  * Health checks proactivos (Fase 6, bloque 6.1): el collector ejecuta
@@ -344,21 +345,21 @@ impl CreateHealthCheck {
  * ejecuta; aplica el resultado y la transicion de estado en una sola
  * transaccion.
  */
-pub fn spawn_health_runner(pool: PgPool, config: Arc<Config>) {
+pub fn spawn_health_runner(pool: PgPool, config: Arc<Config>, bus: EventBus) {
     tokio::spawn(async move {
         let poll = Duration::from_secs(config.health_poll_secs.max(1) as u64);
         let mut ticker = tokio::time::interval(poll);
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             ticker.tick().await;
-            if let Err(e) = run_cycle(&pool).await {
+            if let Err(e) = run_cycle(&pool, &bus).await {
                 tracing::error!("ciclo de health checks fallo: {e}");
             }
         }
     });
 }
 
-async fn run_cycle(pool: &PgPool) -> Result<(), sqlx::Error> {
+async fn run_cycle(pool: &PgPool, bus: &EventBus) -> Result<(), sqlx::Error> {
     let checks = db::list_enabled_checks(pool).await?;
     if checks.is_empty() {
         return Ok(());
@@ -407,6 +408,21 @@ async fn run_cycle(pool: &PgPool) -> Result<(), sqlx::Error> {
         let prev = db::get_check_state(pool, check.id).await?;
         let update = next_state(prev.as_ref(), outcome.ok, now);
         db::apply_check_outcome(pool, check.id, &outcome, &update).await?;
+
+        /* Evento realtime (bloque 6.2): se publica solo cuando la corrida
+         * ya quedo commiteada (resultado + estado), con la transicion
+         * up/down del ciclo para que el dashboard la pinte al instante. */
+        bus.publish(&crate::events::Event::health(
+            check.id,
+            &check.name,
+            outcome.ok,
+            outcome.latency_ms,
+            &outcome.detail,
+            now,
+            update.changed,
+            update.state,
+            update.since,
+        ));
 
         tracing::info!(
             check_id = check.id,

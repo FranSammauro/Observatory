@@ -3,6 +3,7 @@ mod auth;
 mod config;
 mod db;
 mod error;
+mod events;
 mod health;
 mod models;
 mod query;
@@ -34,6 +35,8 @@ async fn main() {
         }
     };
 
+    let event_bus = events::EventBus::new(config.ws_channel_capacity);
+
     let pool = match db::connect(&config.database_url, config.db_max_connections).await {
         Ok(p) => p,
         Err(e) => {
@@ -61,9 +64,14 @@ async fn main() {
     let state = AppState {
         pool,
         config: Arc::new(config),
+        events: event_bus.clone(),
     };
-    alerts::spawn_evaluator(state.pool.clone(), Arc::clone(&state.config));
-    health::spawn_health_runner(state.pool.clone(), Arc::clone(&state.config));
+    alerts::spawn_evaluator(
+        state.pool.clone(),
+        Arc::clone(&state.config),
+        event_bus.clone(),
+    );
+    health::spawn_health_runner(state.pool.clone(), Arc::clone(&state.config), event_bus);
     let app = build_router(state);
 
     tracing::info!("collector listening on {}", listener.local_addr().unwrap());

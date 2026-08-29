@@ -3,6 +3,7 @@ use std::sync::Arc;
 use axum::{
     body::Bytes,
     extract::rejection::QueryRejection,
+    extract::ws::{Message, WebSocket, WebSocketUpgrade},
     extract::{DefaultBodyLimit, Path, Query, State},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Json},
@@ -10,14 +11,18 @@ use axum::{
     Router,
 };
 use chrono::{DateTime, Utc};
+use futures_util::{SinkExt, StreamExt};
+use serde::Deserialize;
 use serde_json::json;
 use sqlx::PgPool;
+use tokio::sync::broadcast;
 
 use crate::alerts::CreateRule;
-use crate::auth::check_bearer;
+use crate::auth::{check_bearer, check_bearer_str};
 use crate::config::Config;
 use crate::db;
 use crate::error::ApiError;
+use crate::events::EventBus;
 use crate::health::CreateHealthCheck;
 use crate::models::{HeartbeatPayload, MetricsPayload, Validate};
 use crate::query::{AlertsQuery, CheckResultsQuery, HistoryQuery, RebootsQuery, SeriesQuery};
@@ -28,6 +33,7 @@ use crate::validation::{utc_from_unix_ts, TimeLimits};
 pub struct AppState {
     pub pool: PgPool,
     pub config: Arc<Config>,
+    pub events: EventBus,
 }
 
 type Result<T> = std::result::Result<T, ApiError>;
@@ -69,6 +75,7 @@ pub fn build_router(state: AppState) -> Router {
             "/api/v1/health/checks/{check_id}/results",
             get(check_results_handler),
         )
+        .route("/api/v1/events", get(events_handler))
         .layer(DefaultBodyLimit::max(state.config.max_body_bytes))
         .with_state(state)
 }
@@ -607,4 +614,93 @@ impl Config {
 fn now_epoch_secs() -> i64 {
     use chrono::Utc;
     Utc::now().timestamp()
+}
+
+/*
+ * WebSocket de eventos realtime (Fase 6, bloque 6.2).
+ *
+ * `GET /api/v1/events` hace upgrade a WebSocket y suscribe al
+ * `EventBus`; desde ahi recibe solo eventos posteriores a la conexion
+ * (transiciones de alertas y corridas de health checks), como JSON con
+ * `type` como tag. No hay replay: el historial sigue en la REST API.
+ *
+ * Autenticacion: mismo bearer token que el resto de la API, pero un
+ * `WebSocket` de navegador no deja setear headers, asi que se acepta el
+ * token tambien por query param `?token=...`. Se valida antes del
+ * upgrade (constante de tiempo, auth.rs). Sin token valido -> 401.
+ */
+
+#[derive(Debug, Deserialize)]
+struct EventsQuery {
+    token: Option<String>,
+}
+
+async fn events_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(params): Query<EventsQuery>,
+    ws: WebSocketUpgrade,
+) -> Result<impl IntoResponse> {
+    let token = &state.config.auth_token;
+    let via_query = match params.token.as_deref() {
+        Some(t) => check_bearer_str(t, token).is_ok(),
+        None => false,
+    };
+    if !via_query && check_bearer(&headers, token).is_err() {
+        return Err(ApiError::unauthorized());
+    }
+
+    let rx = state.events.subscribe();
+    tracing::info!("cliente ws autenticado, upgrade /api/v1/events");
+    Ok(ws.on_upgrade(move |socket| handle_socket(socket, rx)))
+}
+
+/*
+ * Maneja una conexion: reenvia los eventos del bus al socket y responde
+ * pings (para que proxies/intermediarios no corten conexiones idle).
+ * Textos del cliente se ignoran; un Close del lado cliente o un error de
+ * envio terminan el bucle.
+ */
+async fn handle_socket(socket: WebSocket, mut rx: broadcast::Receiver<String>) {
+    let (mut sink, mut stream) = socket.split();
+    loop {
+        tokio::select! {
+            incoming = stream.next() => {
+                match incoming {
+                    Some(Ok(Message::Ping(ping))) => {
+                        if sink.send(Message::Pong(ping)).await.is_err() {
+                            break;
+                        }
+                    }
+                    Some(Ok(Message::Close(_))) | None => break,
+                    Some(Ok(_)) => {}
+                    Some(Err(_)) => break,
+                }
+            }
+            event = rx.recv() => {
+                match event {
+                    Ok(text) => {
+                        if sink.send(Message::Text(text.into())).await.is_err() {
+                            break;
+                        }
+                    }
+                    /* Suscriptor lento: broadcast descarto los eventos que
+                     * no pudo consumir. Avisamos y seguimos desde donde
+                     * viene (el dashboard puede refrescar el historial). */
+                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                        let notice = json!({
+                            "type": "events_lagged",
+                            "dropped": n,
+                        })
+                        .to_string();
+                        if sink.send(Message::Text(notice.into())).await.is_err() {
+                            break;
+                        }
+                        tracing::warn!(dropped = n, "cliente ws atrasado: eventos descartados");
+                    }
+                    Err(broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        }
+    }
 }

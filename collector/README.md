@@ -136,6 +136,27 @@ declarativamente, evaluados por el propio collector, mismo bearer token:
   latency_ms, detail}`. Query param `limit` (default 50, tope 1000);
   `404 unknown_check` si el check no existe.
 
+Eventos realtime (bloque 6.2): `GET /api/v1/events` hace upgrade a
+WebSocket y suscribe al `EventBus` (broadcast `tokio`, capacidad
+`OBS_WS_CHANNEL_CAPACITY`). Los clientes reciben solo los eventos
+posteriores a la conexion (sin replay — el historial queda en la REST
+API), como JSON con `type` como tag:
+
+- `health_result` — una por corrida de check: `{type, check_id,
+  check_name, ok, latency_ms, detail, ts, state_changed, state, since}`.
+- `alert_event` — una por transicion de alerta: `{type, rule_id,
+  rule_name, agent_id, from_state, to_state, ts}` (INACTIVE/PENDING →
+  PENDING, PENDING → FIRING, FIRING → PENDING, FIRING → RESOLVED).
+- `events_lagged` — si el cliente no consume a tiempo, el broadcast
+  descarta los eventos atrasados y se avisa `{type, dropped}` antes de
+  seguir.
+
+Auth: mismo bearer que el resto de la API. Como un WebSocket de
+navegador no deja setear headers, el token se acepta tambien por query
+param `?token=...`; se valida antes del upgrade (`401` sin token
+valido). Los eventos se publican despues del commit en DB, con la misma
+atomicidad que los datos persistidos.
+
 Evaluacion (bloque 6.1): el runner (`health::spawn_health_runner`, en
 una tarea tokio) consulta cada `OBS_HEALTH_POLL_SECS` los checks
 habilitados y corre los que estan vencidos (`interval_secs`). Un probe
@@ -174,6 +195,7 @@ Contrato de payloads: ver [`../agent/src/protocol.c`](../agent/src/protocol.c)
 | `OBS_ALERT_RESOLVE_GRACE_SECS` | `60` | ventana de hysteresis de una alerta FIRING (bloque 5.2); 0 = resolucion inmediata, no puede ser negativa |
 | `OBS_HEALTH_POLL_SECS` | `1` | periodo del runner de health checks (bloque 6.1) |
 | `OBS_HEALTH_DEFAULT_TIMEOUT_SECS` | `5` | timeout por defecto de un check (1-300), si el payload no trae `timeout_secs` (bloque 6.1) |
+| `OBS_WS_CHANNEL_CAPACITY` | `256` | capacidad del canal broadcast de eventos WS; suscriptores lentos descartan eventos (bloque 6.2) |
 | `RUST_LOG` | `info` | nivel de log (tracing) |
 
 ## Build y tests
@@ -181,7 +203,7 @@ Contrato de payloads: ver [`../agent/src/protocol.c`](../agent/src/protocol.c)
 ```sh
 cargo build            # debug
 cargo build --release  # release (LTO + codegen-units=1)
-cargo test             # 109 tests unitarios (sin DB)
+cargo test             # 120 tests unitarios (sin DB)
 cargo clippy           # lint, sin warnings
 cargo fmt              # formato
 ```

@@ -9,6 +9,7 @@ use uuid::Uuid;
 use crate::config::Config;
 use crate::db::{self, AlertRuleRow};
 use crate::error::ApiError;
+use crate::events::{Event as StreamEvent, EventBus};
 
 /*
  * Alert engine (Fase 5, bloque 5.1): reglas declarativas, evaluacion y
@@ -435,7 +436,10 @@ pub struct EvalSummary {
  * deshabilitadas) tambien se procesan: entran como "condicion ausente" y
  * la maquina las resuelve (o las mantiene en la ventana de hysteresis).
  */
-pub async fn eval_cycle(pool: &PgPool, config: &Config) -> Result<EvalSummary, sqlx::Error> {
+pub async fn eval_cycle(
+    pool: &PgPool,
+    config: &Config,
+) -> Result<(EvalSummary, Vec<StreamEvent>), sqlx::Error> {
     let now = Utc::now();
     let rows = db::list_enabled_rules(pool).await?;
     let mut summary = EvalSummary {
@@ -447,7 +451,7 @@ pub async fn eval_cycle(pool: &PgPool, config: &Config) -> Result<EvalSummary, s
     };
 
     if rows.is_empty() {
-        return Ok(summary);
+        return Ok((summary, Vec::new()));
     }
 
     let from = now - Duration::seconds(config.alert_lookback_secs);
@@ -523,6 +527,7 @@ pub async fn eval_cycle(pool: &PgPool, config: &Config) -> Result<EvalSummary, s
     keys.extend(current.keys().cloned());
 
     let mut ops: Vec<AlertOp> = Vec::new();
+    let mut out_events: Vec<StreamEvent> = Vec::new();
     for key in keys {
         summary.agents += 1;
         let (rule_id, agent_id) = key;
@@ -551,6 +556,14 @@ pub async fn eval_cycle(pool: &PgPool, config: &Config) -> Result<EvalSummary, s
                         to: EventState::Pending,
                     }),
                 });
+                out_events.push(StreamEvent::alert(
+                    rule_id,
+                    rule_name,
+                    agent_id,
+                    None,
+                    EventState::Pending.as_str(),
+                    now,
+                ));
                 tracing::info!(rule = rule_name, %agent_id, ?since, "alerta pending");
             }
             Step::Firing { since } => {
@@ -565,6 +578,14 @@ pub async fn eval_cycle(pool: &PgPool, config: &Config) -> Result<EvalSummary, s
                         to: EventState::Firing,
                     }),
                 });
+                out_events.push(StreamEvent::alert(
+                    rule_id,
+                    rule_name,
+                    agent_id,
+                    None,
+                    EventState::Firing.as_str(),
+                    now,
+                ));
                 tracing::info!(rule = rule_name, %agent_id, ?since, "alerta firing");
             }
             Step::StayPending { since } => {
@@ -589,6 +610,14 @@ pub async fn eval_cycle(pool: &PgPool, config: &Config) -> Result<EvalSummary, s
                         to: EventState::Firing,
                     }),
                 });
+                out_events.push(StreamEvent::alert(
+                    rule_id,
+                    rule_name,
+                    agent_id,
+                    Some(EventState::Pending.as_str()),
+                    EventState::Firing.as_str(),
+                    now,
+                ));
                 tracing::info!(rule = rule_name, %agent_id, ?since, "alerta firing (pending -> firing)");
             }
             Step::StayFiring { since } => {
@@ -617,21 +646,33 @@ pub async fn eval_cycle(pool: &PgPool, config: &Config) -> Result<EvalSummary, s
                     agent_id,
                     event,
                 });
+                out_events.push(StreamEvent::alert(
+                    rule_id,
+                    rule_name,
+                    agent_id,
+                    event.from.map(|s| s.as_str()),
+                    EventState::Resolved.as_str(),
+                    now,
+                ));
                 tracing::info!(rule = rule_name, %agent_id, "alerta resuelta");
             }
         }
     }
 
     db::apply_alert_steps(pool, &ops).await?;
-    Ok(summary)
+    Ok((summary, out_events))
 }
 
 /*
  * Lanza el evaluador periodico. SIEMPRE consume un tick inmediato y
  * luego los intervalos; ante un fallo del ciclo (p.ej. DB caida) loguea
  * y sigue en el siguiente tick.
+ *
+ * Publica al bus los eventos de transicion SOLO cuando el ciclo termino
+ * en OK: las transiciones ya estan commiteadas en `alerts`/`alert_events`
+ * (misma atomicidad que el historial, bloque 5.3).
  */
-pub fn spawn_evaluator(pool: PgPool, config: Arc<Config>) {
+pub fn spawn_evaluator(pool: PgPool, config: Arc<Config>, bus: EventBus) {
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(std::time::Duration::from_secs(
             config.alert_eval_interval_secs.max(1) as u64,
@@ -640,14 +681,20 @@ pub fn spawn_evaluator(pool: PgPool, config: Arc<Config>) {
         loop {
             tick.tick().await;
             match eval_cycle(&pool, &config).await {
-                Ok(s) => tracing::debug!(
-                    rules = s.rules,
-                    agents = s.agents,
-                    pending = s.pending,
-                    firing = s.firing,
-                    resolved = s.resolved,
-                    "ciclo de alertas evaluado"
-                ),
+                Ok((s, events)) => {
+                    for ev in &events {
+                        bus.publish(ev);
+                    }
+                    tracing::debug!(
+                        rules = s.rules,
+                        agents = s.agents,
+                        pending = s.pending,
+                        firing = s.firing,
+                        resolved = s.resolved,
+                        events = events.len(),
+                        "ciclo de alertas evaluado"
+                    );
+                }
                 Err(e) => tracing::warn!("ciclo de evaluacion de alertas fallo: {e}"),
             }
         }

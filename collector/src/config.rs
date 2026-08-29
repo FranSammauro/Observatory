@@ -1,5 +1,7 @@
 use std::env;
 
+use crate::events::WS_CHANNEL_CAPACITY_DEFAULT;
+
 pub const PROTOCOL_VERSION: i32 = 1;
 pub const MAX_ARRAY_ENTRIES: usize = 16;
 /* El agent serializa como maximo ~14 claves escalares en `metrics`
@@ -27,6 +29,15 @@ pub const MAX_ALERT_HISTORY_LIMIT: i64 = 1_000;
  * intervalo, eventos de tamano acotado; mismo criterio que reboots. */
 pub const DEFAULT_HEALTH_RESULTS_LIMIT: i64 = 50;
 pub const MAX_HEALTH_RESULTS_LIMIT: i64 = 1_000;
+
+/*
+ * WebSocket de eventos realtime (bloque 6.2): capacidad de la cola por
+ * suscriptor. Los eventos son infrecuentes (transiciones de alertas +
+ * corridas de checks), 256 eventos bufferizados cubren holgadamente los
+ * intervalos lanzos; un suscriptor mas lento que la cola recibe un
+ * aviso `events_lagged` y sigue desde donde viene (broadcast descarta,
+ * no bloquea).
+ */
 
 /* Evaluador de alertas (bloque 5.1): cada cuanto evaluar las reglas y
  * que ventana de `metric_samples` mirar. El intervalo es ~el periodo de
@@ -57,6 +68,7 @@ pub struct Config {
     pub alert_resolve_grace_secs: i64,
     pub health_poll_secs: i64,
     pub health_default_timeout_secs: i64,
+    pub ws_channel_capacity: usize,
 }
 
 fn parse_u32(name: &str, default: u32) -> Result<u32, String> {
@@ -113,6 +125,10 @@ impl Config {
         let alert_resolve_grace_secs = parse_i64("OBS_ALERT_RESOLVE_GRACE_SECS", 60)?;
         let health_poll_secs = parse_i64("OBS_HEALTH_POLL_SECS", 1)?;
         let health_default_timeout_secs = parse_i64("OBS_HEALTH_DEFAULT_TIMEOUT_SECS", 5)?;
+        let ws_channel_capacity = parse_u32(
+            "OBS_WS_CHANNEL_CAPACITY",
+            WS_CHANNEL_CAPACITY_DEFAULT as u32,
+        )? as usize;
 
         validate_state_limits(state_online_secs, state_degraded_secs)?;
         validate_reboot_drop(reboot_min_uptime_drop_secs)?;
@@ -120,6 +136,7 @@ impl Config {
         validate_alert_grace(alert_resolve_grace_secs)?;
         validate_health_poll(health_poll_secs)?;
         validate_health_timeout(health_default_timeout_secs)?;
+        validate_ws_capacity(ws_channel_capacity)?;
 
         Ok(Self {
             listen_addr,
@@ -137,6 +154,7 @@ impl Config {
             alert_resolve_grace_secs,
             health_poll_secs,
             health_default_timeout_secs,
+            ws_channel_capacity,
         })
     }
 }
@@ -213,6 +231,18 @@ pub fn validate_health_timeout(timeout_secs: i64) -> Result<(), String> {
         );
     }
     Ok(())
+}
+
+/*
+ * Canal de eventos del WebSocket (bloque 6.2): una cola vacia (0) no
+ * tiene sentido; un broadcast de tokio requiere capacidad >= 1.
+ */
+pub fn validate_ws_capacity(capacity: usize) -> Result<(), String> {
+    if capacity >= 1 {
+        Ok(())
+    } else {
+        Err("OBS_WS_CHANNEL_CAPACITY debe ser mayor que 0".to_string())
+    }
 }
 
 #[cfg(test)]
@@ -300,5 +330,16 @@ mod tests {
         assert!(validate_health_timeout(0).is_err());
         assert!(validate_health_timeout(301).is_err());
         assert!(validate_health_timeout(-5).is_err());
+    }
+
+    #[test]
+    fn ws_capacity_accepts_positive() {
+        assert!(validate_ws_capacity(1).is_ok());
+        assert!(validate_ws_capacity(256).is_ok());
+    }
+
+    #[test]
+    fn ws_capacity_rejects_zero() {
+        assert!(validate_ws_capacity(0).is_err());
     }
 }

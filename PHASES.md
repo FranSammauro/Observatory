@@ -32,8 +32,8 @@ desarrollo con commits progresivos.
       Checks HTTP/TCP, eventos realtime. Subdividida en 3 bloques:
       **6.1** health checks HTTP/TCP (definiciones + ejecutor +
       resultados + estado + query API, entregado), **6.2** WebSocket de
-      eventos realtime (canal + publication desde alertas y health
-      checks), **6.3** historial unificado + summary de salud +
+      eventos realtime (canal + publicación desde alertas y health
+      checks, entregado), **6.3** historial unificado + summary de salud +
       eventos de conectividad. Ver detalle abajo.
 - [ ] **Fase 7 — Dashboard**
       Overview, host page, alertas, históricos.
@@ -530,3 +530,46 @@ desarrollo con commits progresivos.
   - Delete con CASCADE: borrado el check 2, sus resultados y estado
     desaparecen del listado.
   - 109 tests en verde, build/clippy/fmt limpios.
+
+- **Bloque 6.2 — WebSocket de eventos realtime (entregado):**
+  - `src/events.rs`: `Event` enum serializado con `type` como tag
+    (`alert_event` | `health_result`) + `EventBus` sobre
+    `tokio::sync::broadcast<String>` (capacidad `OBS_WS_CHANNEL_CAPACITY`,
+    default 256). Reenviar `String` evita re-serializar y mantiene los
+    eventos consistentes con lo que se persisten en DB.
+  - `src/health.rs` / `src/alerts.rs`: los runners reciben el `EventBus`;
+    publican el evento solo despues de commitear en DB (misma atomicidad
+    que antes). Alertas: eventos en cada transicion
+    INACTIVE/PENDING->PENDING, PENDING->FIRING, FIRING->PENDING
+    (reingreso), FIRING->RESOLVED. Health: una `health_result` por corrida
+    (incluye `state`, `since`, `state_changed`). Los eventos no se
+    persisten: el historial sigue en la REST API.
+  - `src/routes.rs`: `GET /api/v1/events` con upgrade a WebSocket. Auth
+    reutiliza el bearer token; ademas del header `Authorization` se acepta
+    `?token=...` (un WebSocket de navegador no permite headers) y se
+    valida antes del upgrade -> 401 sin auth. `handle_socket`: split
+    sink/stream, responde pings, ignora textos del cliente, y ante
+    `RecvError::Lagged` emite un aviso `{"type":"events_lagged",
+    "dropped":n}` antes de seguir.
+  - `src/auth.rs`: `check_bearer_str` comparte la comparacion constante de
+    tiempo con `check_bearer`.
+  - `src/config.rs`: `OBS_WS_CHANNEL_CAPACITY` (>= 1), validado al
+    arrancar.
+  - Tests: 11 nuevos (Event serialization, EventBus subscribe/lagged/capped
+    capacity, `events_lagged` payload, auth str, ws capacity config).
+    **120 en total**.
+
+**Validado en este entorno (bloque 6.2):**
+
+- Postgres real + collector de la validacion 6.1 + `http.server` (8091):
+  - Cliente WS autenticado recibe `health_result` por corrida de cada
+    check (~cada 3-4s), con `state`/`since`/`state_changed`, tanto de HTTP
+    como TCP.
+  - `curl` con handshake WS sin token -> 401; con token invalido -> 401;
+    con token valido -> 101 (upgrade).
+  - Reglas de alerta disparando desde samples inyectados: el `alert_event`
+    (firing->resolved) llega al WS en vivo al arrancar el cliente.
+  - Happy path WS: cliente conectado desde antes de la transicion recibe
+    los eventos de alerta en orden junto con los health_result del mismo
+    intervalo.
+  - 120 tests en verde, build/clippy/fmt limpios.
