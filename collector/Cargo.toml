@@ -22,6 +22,8 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tower-http = { version = "0.6", features = ["trace", "fs"] }
 futures-util = "0.3"
+axum-server = { version = "0.8.0", features = ["tls-rustls"] }
+rustls = "0.23.43"
 
 [profile.release]
 lto = true

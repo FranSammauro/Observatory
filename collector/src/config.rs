@@ -1,4 +1,5 @@
 use std::env;
+use std::path::PathBuf;
 
 use crate::events::WS_CHANNEL_CAPACITY_DEFAULT;
 use crate::state::StateLimits;
@@ -78,6 +79,11 @@ pub struct Config {
     pub ws_channel_capacity: usize,
     pub connectivity_poll_secs: i64,
     pub dashboard_dir: String,
+    pub rate_limit_enabled: bool,
+    pub rate_limit_rate: f64,
+    pub rate_limit_burst: f64,
+    pub tls_cert: Option<PathBuf>,
+    pub tls_key: Option<PathBuf>,
 }
 
 fn parse_u32(name: &str, default: u32) -> Result<u32, String> {
@@ -108,6 +114,25 @@ fn parse_f64(name: &str, default: f64) -> Result<f64, String> {
             .map_err(|_| format!("{name} no es un numero valido: '{v}'")),
         Err(_) => Ok(default),
     }
+}
+
+fn parse_bool(name: &str, default: bool) -> Result<bool, String> {
+    match env::var(name) {
+        Ok(v) => match v.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => Ok(true),
+            "0" | "false" | "no" | "off" => Ok(false),
+            _ => Err(format!("{name} debe ser true o false: '{v}'")),
+        },
+        Err(_) => Ok(default),
+    }
+}
+
+/* Variables opcionales: vacias o ausentes valen None. */
+fn opt_env_path(name: &str) -> Option<PathBuf> {
+    env::var(name)
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .map(PathBuf::from)
 }
 
 impl Config {
@@ -142,6 +167,11 @@ impl Config {
         let dashboard_raw =
             env::var("OBS_DASHBOARD_DIR").unwrap_or_else(|_| "dashboard".to_string());
         let dashboard_dir = sanitize_dashboard_dir(&dashboard_raw)?;
+        let rate_limit_enabled = parse_bool("OBS_RATE_LIMIT_ENABLED", true)?;
+        let rate_limit_rate = parse_f64("OBS_RATE_LIMIT_RATE", 20.0)?;
+        let rate_limit_burst = parse_f64("OBS_RATE_LIMIT_BURST", 50.0)?;
+        let tls_cert = opt_env_path("OBS_TLS_CERT");
+        let tls_key = opt_env_path("OBS_TLS_KEY");
 
         validate_state_limits(state_online_secs, state_degraded_secs)?;
         validate_reboot_drop(reboot_min_uptime_drop_secs)?;
@@ -151,6 +181,8 @@ impl Config {
         validate_health_timeout(health_default_timeout_secs)?;
         validate_ws_capacity(ws_channel_capacity)?;
         validate_connectivity_poll(connectivity_poll_secs)?;
+        validate_rate_limit(rate_limit_enabled, rate_limit_rate, rate_limit_burst)?;
+        validate_tls_pair(tls_cert.as_ref(), tls_key.as_ref())?;
 
         Ok(Self {
             listen_addr,
@@ -171,6 +203,11 @@ impl Config {
             ws_channel_capacity,
             connectivity_poll_secs,
             dashboard_dir,
+            rate_limit_enabled,
+            rate_limit_rate,
+            rate_limit_burst,
+            tls_cert,
+            tls_key,
         })
     }
 
@@ -280,6 +317,43 @@ pub fn validate_connectivity_poll(poll_secs: i64) -> Result<(), String> {
         return Err("OBS_CONNECTIVITY_POLL_SECS debe ser mayor o igual a 1".to_string());
     }
     Ok(())
+}
+
+/*
+ * Rate limiting (Fase 8, bloque 8.1): si esta habilitado, rate y burst
+ * deben ser positivos. Deshabilitado, ambos se ignoran (se pueden dejar
+ * en 0). Falla ruidoso ante configuracion contradictoria.
+ */
+pub fn validate_rate_limit(enabled: bool, rate: f64, burst: f64) -> Result<(), String> {
+    if !enabled {
+        return Ok(());
+    }
+    if !rate.is_finite() || rate <= 0.0 {
+        return Err("OBS_RATE_LIMIT_RATE debe ser un numero positivo".to_string());
+    }
+    if !burst.is_finite() || burst <= 0.0 {
+        return Err("OBS_RATE_LIMIT_BURST debe ser un numero positivo".to_string());
+    }
+    Ok(())
+}
+
+/*
+ * TLS (Fase 8, bloque 8.2): el certificado y la clave privada van
+ * siempre juntos. Falta ruidoso al arrancar si solo se seteo uno — un
+ * TLS medio configurado (cert sin key, o viceversa) es peor que advertir
+ * en claro, misma filosofia de errores que el resto de la config.
+ */
+pub fn validate_tls_pair(cert: Option<&PathBuf>, key: Option<&PathBuf>) -> Result<(), String> {
+    match (cert, key) {
+        (Some(_), Some(_)) => Ok(()),
+        (None, None) => Ok(()),
+        (Some(_), None) => {
+            Err("OBS_TLS_CERT esta set pero OBS_TLS_KEY falta: ambos deben ir juntos".to_string())
+        }
+        (None, Some(_)) => {
+            Err("OBS_TLS_KEY esta set pero OBS_TLS_CERT falta: ambos deben ir juntos".to_string())
+        }
+    }
 }
 
 /*
@@ -418,5 +492,46 @@ mod tests {
         assert!(sanitize_dashboard_dir("").is_err());
         assert!(sanitize_dashboard_dir("/").is_err());
         assert!(sanitize_dashboard_dir("   ").is_err());
+    }
+
+    #[test]
+    fn rate_limit_accepts_positive_when_enabled() {
+        assert!(validate_rate_limit(true, 20.0, 50.0).is_ok());
+        assert!(validate_rate_limit(true, 0.5, 5.0).is_ok());
+    }
+
+    #[test]
+    fn rate_limit_rejects_zero_negative_or_nan_when_enabled() {
+        assert!(validate_rate_limit(true, 0.0, 50.0).is_err());
+        assert!(validate_rate_limit(true, -1.0, 50.0).is_err());
+        assert!(validate_rate_limit(true, 20.0, 0.0).is_err());
+        assert!(validate_rate_limit(true, f64::NAN, 50.0).is_err());
+        assert!(validate_rate_limit(true, f64::INFINITY, 50.0).is_err());
+    }
+
+    #[test]
+    fn rate_limit_disabled_ignores_values() {
+        assert!(validate_rate_limit(false, 0.0, 0.0).is_ok());
+        assert!(validate_rate_limit(false, -1.0, -5.0).is_ok());
+    }
+
+    fn path(p: &str) -> Option<PathBuf> {
+        Some(PathBuf::from(p))
+    }
+
+    #[test]
+    fn tls_pair_accepts_both_or_none() {
+        assert!(validate_tls_pair(None, None).is_ok());
+        assert!(validate_tls_pair(path("/c.pem").as_ref(), path("/k.pem").as_ref()).is_ok());
+    }
+
+    #[test]
+    fn tls_pair_rejects_cert_without_key() {
+        assert!(validate_tls_pair(path("/c.pem").as_ref(), None).is_err());
+    }
+
+    #[test]
+    fn tls_pair_rejects_key_without_cert() {
+        assert!(validate_tls_pair(None, path("/k.pem").as_ref()).is_err());
     }
 }

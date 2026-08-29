@@ -4,15 +4,12 @@ Collector central en **Rust (Axum)** que recibe los payloads que emite el
 agent C (`observer-agent`), los valida, los autentica por bearer token, y
 los persiste en PostgreSQL.
 
-> Estado actual: **Fase 7 completa** — dashboard web estatico servido por
-> el propio collector con login bearer: Overview (summary cards, lista de
-> agents, timeline en vivo por WS), host page (detalle por agent, series
-> con ultimo valor, grafica SVG, timeline del host y reboots) y alertas e
-> historicos (gestion de rules y checks, alertas activas, historial de
-> alertas e historial unificado con filtros). Fases 6 entera (health
-> checks 6.1, WS realtime 6.2, historial unificado + summary +
-> conectividad 6.3), 5 entera (alert engine: 5.1, 5.2 y 5.3) y Fases 4,
-> 4.2 y 4.3 tambien. Ver [`../PHASES.md`](../PHASES.md).
+> Estado actual: **Fase 8 en curso** — entregados los bloques 8.1 (rate
+> limiting por IP sobre la ingestion) y 8.2 (TLS nativo rustls: el
+> collector sirve `https://` con `OBS_TLS_CERT` y `OBS_TLS_KEY`, y sigue
+> en `http://` plano sin ellos). Fase 7 completa (dashboard estatico con
+> login bearer + alertas e historicos), Fases 6, 5, 4, 4.2 y 4.3
+> tambien. Ver [`../PHASES.md`](../PHASES.md).
 
 ## Arquitectura
 
@@ -71,6 +68,12 @@ Ingestion (Fase 3):
 
 - `POST /api/v1/metrics` — sample completo de metricas del agent.
 - `POST /api/v1/agents/heartbeat` — heartbeat liviano (mas frecuente).
+
+Ambos endpoints de ingestion estan **rate-limiteados por IP** (Fase 8,
+bloque 8.1): token bucket por IP de origen; al superar el burst se
+responden `429` con header `Retry-After`. Configurable con
+`OBS_RATE_LIMIT_ENABLED` (default true), `OBS_RATE_LIMIT_RATE` (20 req/s)
+y `OBS_RATE_LIMIT_BURST` (50). `/healthz` y la query API quedan exentos.
 
 Query API (Fase 4, bloques 4.1 y 4.2) — de solo lectura, mismo bearer
 token:
@@ -239,6 +242,30 @@ Contrato de payloads: ver [`../agent/src/protocol.c`](../agent/src/protocol.c)
 (serializador del agent) y [`../docs/adr/0003-collector-ingestion.md`]
 (../docs/adr/0003-collector-ingestion.md) para las decisiones de diseno.
 
+## Autenticacion y TLS (Fase 8, bloque 8.2)
+
+La autenticacion es bearer: el token se envia como
+`Authorization: Bearer <token>` en todos los endpoints (y como query
+`?token=` en el WS). Con la red local de desarrollo alcanza el
+`http://` plano; para exponer el collector fuera de la red confiable se
+activa el TLS nativo (rustls) apuntando `OBS_TLS_CERT`/`OBS_TLS_KEY` a
+los PEM:
+
+```sh
+DATABASE_URL="postgres://observer@127.0.0.1:55432/observer" \
+OBS_COLLECTOR_TOKEN="tu-token" \
+OBS_TLS_CERT="/etc/observer/cert.pem" \
+OBS_TLS_KEY="/etc/observer/key.pem" \
+cargo run
+```
+
+El collector sirve entonces `https://` y el dashboard habla solo por
+`https`/`wss` (derivado de `location.protocol`, sin cambios en la UI).
+El **agent sigue en HTTP plano** — no sabe hacer TLS (ADR-0002): los
+agents remotos entran por un tunel/stunnel dentro de la red confiable.
+Sin cert/key el collector queda en `http://` plano; si el pair esta
+incompleto o el PEM es ilegible, el arranque falla ruidoso.
+
 ## Requisitos
 
 - Rust toolchain (edition 2021).
@@ -266,6 +293,11 @@ Contrato de payloads: ver [`../agent/src/protocol.c`](../agent/src/protocol.c)
 | `OBS_WS_CHANNEL_CAPACITY` | `256` | capacidad del canal broadcast de eventos WS; suscriptores lentos descartan eventos (bloque 6.2) |
 | `OBS_CONNECTIVITY_POLL_SECS` | `5` | periodo del runner de conectividad (bloque 6.3); >= 1, fail-fast al arrancar |
 | `OBS_DASHBOARD_DIR` | `dashboard` | carpeta relativa (a CWD) con la UI estatica del dashboard (bloque 7.1); no puede quedar vacia |
+| `OBS_RATE_LIMIT_ENABLED` | `true` | habilita el rate limiting por IP sobre la ingestion (bloque 8.1) |
+| `OBS_RATE_LIMIT_RATE` | `20` | tokens/segundos por IP (bloque 8.1) |
+| `OBS_RATE_LIMIT_BURST` | `50` | rafaga maxima (tokens) por IP (bloque 8.1) |
+| `OBS_TLS_CERT` | (vacias) | ruta al PEM del certificado; **debe ir con `OBS_TLS_KEY`** y activa `https://` (bloque 8.2) |
+| `OBS_TLS_KEY` | (vacias) | ruta al PEM de la clave privada; debe ir con `OBS_TLS_CERT` (bloque 8.2) |
 | `RUST_LOG` | `info` | nivel de log (tracing) |
 
 ## Build y tests
@@ -273,7 +305,7 @@ Contrato de payloads: ver [`../agent/src/protocol.c`](../agent/src/protocol.c)
 ```sh
 cargo build            # debug
 cargo build --release  # release (LTO + codegen-units=1)
-cargo test             # 140 tests unitarios (sin DB)
+cargo test             # 158 tests unitarios (sin DB)
 cargo clippy           # lint, sin warnings
 cargo fmt              # formato
 ```

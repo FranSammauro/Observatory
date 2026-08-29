@@ -49,15 +49,23 @@ token y persistencia en PostgreSQL. Ver [`agent/README.md`](agent/README.md)
 y [`collector/README.md`](collector/README.md). Decisiones de ingestion:
 [`docs/adr/0003-collector-ingestion.md`](docs/adr/0003-collector-ingestion.md).
 
-Ya del dashboard (Fase 7), entregado completo: **7.1 overview skeleton**
+Del dashboard (Fase 7), entregado completo: **7.1 overview skeleton**
 (login bearer, summary cards, lista de agents y timeline en vivo por WS),
 **7.2 host page** (detalle por agent, series con grafica SVG, timeline
 del host y reboots) y **7.3 alertas e historicos** (gestion de rules y
 checks, alertas activas, historial de alertas e historial unificado con
-filtros), servidos por el propio collector. Del camino hacia producción
-falta hardening/TLS/benchmark (Fase 8). Ya entregadas: query API +
-estados de conectividad (Fase 4), alert engine (Fase 5) y health checks
-+ eventos realtime + historial unificado + summary (Fase 6).
+filtros), servidos por el propio collector. Arrancada la **Fase 8**
+(hardening): entregados **8.1 rate limiting** por IP sobre la ingestion
+(token bucket, 429 + Retry-After) y **8.2 TLS nativo** (rustls: el
+collector sirve `https://` cuando se le da cert/key, con fallback a
+`http://` plano para la red local). Faltan **8.3** (sanitizers/fuzzing
+del agent + benchmark reproducible en Pentium M + Alpine) y ya entregadas:
+query API + estados de conectividad (Fase 4), alert engine (Fase 5) y
+health checks + eventos realtime + historial unificado + summary
+(Fase 6).
 
-TLS todavía no está implementado (queda para la Fase 8 de hardening) —
-ver [`docs/adr/0002-transport-protocol.md`](docs/adr/0002-transport-protocol.md).
+El agent queda en HTTP plano y **rechaza** URLs `https://` (no sabe hacer
+TLS por diseño, ADR-0002): el TLS lo termina el propio collector para el
+dashboard (browser) y para agents remotos via tunel/stunnel dentro de la
+red confiable. Ver
+[`docs/adr/0002-transport-protocol.md`](docs/adr/0002-transport-protocol.md).

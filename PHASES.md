@@ -47,7 +47,10 @@ desarrollo con commits progresivos.
       de alertas y historial unificado con filtros. Ver detalle abajo.
 - [ ] **Fase 8 — Hardening y benchmark experimental**
       TLS, rate limiting, sanitizers/fuzzing, benchmark reproducible en
-      Pentium M + Alpine Linux.
+      Pentium M + Alpine Linux. Subdividida en 3 bloques: **8.1** rate
+      limiting por IP sobre la ingestion (entregado); **8.2** TLS nativo
+      (rustls) en el collector (entregado); **8.3** sanitizers/fuzzing del
+      agent + benchmark reproducible. Ver detalle abajo.
 
 ## Fase 1 — detalle
 
@@ -758,3 +761,65 @@ devuelve al login.
   de `host.js`. Test de existencias del bundle cubre las hojas sin cambios
   (sigue **143 tests**). Validado: 143 tests verdes + clippy limpio + JS
   3 paginas pasan `node --check`.
+
+## Fase 8 — detalle
+
+Hardening del parque: limitar el abuso de ingestion, cifrar el transporte
+y hacer el binario/benchmark reproducibles y auditable. La decision de TLS
+del ADR-0002 se cierra aca: **TLS end-to-end con rustls en el propio
+collector** (sin reverse proxy), consistente con el informe tecnico.
+
+**Bloques:**
+
+- **Bloque 8.1 — Rate limiting por IP (entregado):**
+  - `collector/src/ratelimit.rs`: token bucket por clave de cliente, con
+    nucleo puro (`TokenBucket`) testeable con reloj sintetico (`Duration`),
+    mapa compartido `RateLimiter` (Mutex + HashMap) con GC de buckets
+    inactivos (300s) y tope de entradas (10k, clave nueva rechazada).
+  - Middleware `rate_limit_middleware` (`routes.rs`) anclado con
+    `route_layer` **solo sobre los endpoints de ingestion** (`POST
+    /api/v1/metrics` y `POST /api/v1/agents/heartbeat`); `/healthz` y el
+    resto de la API quedan exentos. Clave = IP de origen
+    (ConnectInfo/`into_make_service_with_connect_info`). 429 con body
+    `{"error":{"code":"rate_limited",...}}` y header `Retry-After`.
+  - Config: `OBS_RATE_LIMIT_ENABLED` (default true), `OBS_RATE_LIMIT_RATE`
+    (default 20 req/s), `OBS_RATE_LIMIT_BURST` (default 50); validacion
+    ruidosa de valores invalidos al arrancar.
+  - Tests: 12 nuevos (155 total) — bucket, refill, cap, per-key, GC,
+    mapa lleno, config. Clippy limpio.
+  - Validado en vivo: burst=2/rate=1 -> 200/200/429/429; `/healthz`
+    exento; heartbeat comparte bucket (429); `ENABLED=false` deja pasar
+    todo; burst invalido aborta al arranque.
+
+- **Bloque 8.2 — TLS nativo en el collector (entregado):**
+  - `axum-server` (feature `tls-rustls`) sobre el listener ya bindeado
+    (`from_tcp_rustls`): cuando `OBS_TLS_CERT` y `OBS_TLS_KEY` apuntan a
+    un PEM valido, el collector sirve `https://` end-to-end con rustls
+    (provider aws-lc-rs instalado explícitamente). Sin cert/key sigue el
+    `http://` plano para la red local de desarrollo.
+  - Shutdown graceful compartido con el camino http (`Handle` +
+    `graceful_shutdown` 30s). Falla ruidoso al arrancar si el pair esta
+    incompleto (cert sin key o key sin cert) o si el PEM es ilegible.
+  - Decision ADR-0002: el **agent queda en HTTP plano y mantiene su
+    rechazo explicito de URLs `https://`** (no sabe hacer TLS; degradar
+    silenciosamente seria peor). El TLS lo termina el propio collector:
+    el browser/dashboard habla `https://` directo (WS automatico como
+    `wss://`, derivado de `location.protocol`), y los agents remotos
+    llegan por un tunel/stunnel dentro de la red confiable.
+  - Tests: 3 nuevos (158 total) de validacion del pair cert/key. Clippy
+    limpio.
+  - Validado en vivo con cert self-signed: ingestion/`/healthz`/
+    dashboard/`host.html` por `https` → 200; HTTP plano contra el puerto
+    TLS falla (handshake); curl sin `-k` rechaza (self-signed) y con
+    `--cacert` verifica → 200; rate limiting sigue operando sobre TLS
+    (200/200/429); cert sin key / key sin cert / PEM ilegible abortan al
+    arrancar.
+
+- **Bloque 8.3 — Sanitizers/fuzzing + benchmark (pendiente):**
+  - Agent: ampliar `make sanitize` (ya hay ASan/UBSan) con LSan y correr
+    contra el parser de payloads; fuzzing del parser de URL/reponses del
+    agent (libFuzzer o un harness minimo) y del JSON de ingestion del
+    collector.
+  - Benchmark reproducible: script que levanta postgres + collector
+    (release), corre N agents simulados y mide ingestion/latencia/envio
+    en un Pentium M + Alpine como referencia.

@@ -4,9 +4,10 @@ use axum::{
     body::Bytes,
     extract::rejection::QueryRejection,
     extract::ws::{Message, WebSocket, WebSocketUpgrade},
-    extract::{DefaultBodyLimit, Path, Query, State},
+    extract::{ConnectInfo, DefaultBodyLimit, Path, Query, Request, State},
     http::{HeaderMap, StatusCode},
-    response::{IntoResponse, Json},
+    middleware::{self, Next},
+    response::{IntoResponse, Json, Response},
     routing::{delete, get, post},
     Router,
 };
@@ -30,6 +31,7 @@ use crate::query::{
     AlertsQuery, CheckResultsQuery, HistoryQuery, RebootsQuery, SeriesQuery, TimelineEntry,
     TimelineFilter, TimelineQuery,
 };
+use crate::ratelimit::{RateLimiter, RatePolicy, Take};
 use crate::state::{connectivity_state, StateLimits};
 use crate::validation::{utc_from_unix_ts, TimeLimits};
 
@@ -38,6 +40,7 @@ pub struct AppState {
     pub pool: PgPool,
     pub config: Arc<Config>,
     pub events: EventBus,
+    pub limiter: Arc<RateLimiter>,
 }
 
 type Result<T> = std::result::Result<T, ApiError>;
@@ -45,10 +48,19 @@ type Result<T> = std::result::Result<T, ApiError>;
 pub fn build_router(state: AppState) -> Router {
     let dashboard_dir = state.config.dashboard_dir.clone();
     let index_path = format!("{dashboard_dir}/index.html");
+    let limiter = state.limiter.clone();
     Router::new()
-        .route("/healthz", get(healthz))
         .route("/api/v1/agents/heartbeat", post(heartbeat_handler))
         .route("/api/v1/metrics", post(metrics_handler))
+        /* Rate limiting (Fase 8, bloque 8.1): solo sobre los endpoints de
+         * ingestion (los que los agents golpean repetido). route_layer
+         * afecta solo a las rutas registradas hasta este punto; /healthz
+         * se registra despues y queda exento. */
+        .route_layer(middleware::from_fn_with_state(
+            limiter,
+            rate_limit_middleware,
+        ))
+        .route("/healthz", get(healthz))
         .route("/api/v1/agents", get(agents_list_handler))
         .route("/api/v1/agents/{agent_id}", get(agent_detail_handler))
         .route(
@@ -89,6 +101,46 @@ pub fn build_router(state: AppState) -> Router {
         .fallback_service(
             ServeDir::new(&dashboard_dir).not_found_service(ServeFile::new(index_path)),
         )
+}
+
+/*
+ * Rate limiting por IP (Fase 8, bloque 8.1). Clave = IP de origen del
+ * socket; cuando no hay ConnectInfo (tests unitarios / handshakes
+ * raros) se cae a una clave compartida y el limiter de policy deshabilitada
+ * simplemente deja pasar.
+ */
+async fn rate_limit_middleware(
+    State(limiter): State<Arc<RateLimiter>>,
+    ConnectInfo(addr): ConnectInfo<std::net::SocketAddr>,
+    req: Request,
+    next: Next,
+) -> Response {
+    let key = addr.ip().to_string();
+    let take = limiter.allow(key);
+    if matches!(take, Take::Denied) {
+        return too_many_requests(limiter.policy());
+    }
+    next.run(req).await
+}
+
+fn too_many_requests(policy: RatePolicy) -> Response {
+    let retry_after = if policy.rate_per_sec > 0.0 {
+        1.0 / policy.rate_per_sec
+    } else {
+        0.0
+    };
+    let body = Json(json!({
+        "error": {
+            "code": "rate_limited",
+            "message": "demasiadas peticiones, reintente en un momento",
+        }
+    }));
+    (
+        StatusCode::TOO_MANY_REQUESTS,
+        [(axum::http::header::RETRY_AFTER, format!("{retry_after:.1}"))],
+        body,
+    )
+        .into_response()
 }
 
 /*
