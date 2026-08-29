@@ -215,3 +215,76 @@ body {
 .btn.primary { background: var(--accent); border-color: var(--accent); color: #082f49; font-weight: 600; }
 .btn.ghost { background: transparent; }
 .btn.small { padding: 4px 10px; font-size: 13px; }
+
+.inline { display: inline; padding: 0; }
+.host-here { color: var(--accent); }
+
+.host-link {
+  color: var(--accent);
+  text-decoration: none;
+}
+
+.host-link:hover {
+  text-decoration: underline;
+}
+
+.kv-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.kv-list li {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 6px;
+}
+
+.kv-list .when {
+  color: var(--muted);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.chart-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.chart-head h3 { margin: 0; }
+
+#chart {
+  width: 100%;
+  height: 220px;
+  margin-top: 8px;
+  border-radius: 8px;
+  background: var(--panel-2);
+}
+
+.chart-line {
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 2;
+  vector-effect: non-scaling-stroke;
+}
+
+.axis {
+  stroke: var(--border);
+  stroke-width: 1;
+}
+
+.chart-label {
+  fill: var(--muted);
+  font-size: 12px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  vector-effect: non-scaling-stroke;
+}
+
+.chart-stats { margin: 8px 0 0; }

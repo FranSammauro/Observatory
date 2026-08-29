@@ -886,20 +886,26 @@ async fn handle_socket(socket: WebSocket, mut rx: broadcast::Receiver<String>) {
 #[cfg(test)]
 mod tests {
     /* El dashboard (Fase 7) se sirve desde disco junto al manifest: un
-     * backend sin su index.html es un arranque roto en vivo. Este test
+     * backend sin su frontend es un arranque roto en vivo. Este test
      * pinchea el bundle frente a olvidos de commit. */
     #[test]
     fn dashboard_index_html_exists_next_to_manifest() {
         let root = env!("CARGO_MANIFEST_DIR");
-        let index = std::path::Path::new(root)
-            .join("dashboard")
-            .join("index.html");
-        assert!(
-            index.is_file(),
-            "falta {}: el collector sirve el dashboard desde ese path",
-            index.display()
-        );
-        let app_js = std::path::Path::new(root).join("dashboard").join("app.js");
-        assert!(app_js.is_file(), "falta {}", app_js.display());
+        let dir = std::path::Path::new(root).join("dashboard");
+        for file in [
+            "index.html",
+            "host.html",
+            "common.js",
+            "app.js",
+            "host.js",
+            "style.css",
+        ] {
+            let path = dir.join(file);
+            assert!(
+                path.is_file(),
+                "falta {}: el collector sirve el dashboard desde ese path",
+                path.display()
+            );
+        }
     }
 }

@@ -40,10 +40,10 @@ desarrollo con commits progresivos.
       build step, filosofia del repo). Subdividida en 3 bloques: **7.1**
       overview + skeleton (entregado): login bearer + layout +
       navegacion, summary cards, lista de agents y timeline unificado en
-      vivo por WS; **7.2** host page (detalle por agent: estado, series
-      de metricas, reboots, conectividad, alertas del host); **7.3**
-      alertas e historicos (gestion de rules y checks + historiales
-      completos). Ver detalle abajo.
+      vivo por WS; **7.2** host page (entregado): detalle por agent con
+      estado, ultimo valor de cada serie, grafica SVG de una serie,
+      timeline del host y reboots; **7.3** alertas e historicos (gestion
+      de rules y checks + historiales completos). Ver detalle abajo.
 - [ ] **Fase 8 — Hardening y benchmark experimental**
       TLS, rate limiting, sanitizers/fuzzing, benchmark reproducible en
       Pentium M + Alpine Linux.
@@ -711,13 +711,27 @@ devuelve al login.
     eventos de `connectivity_event`/`health_result`/`alert_event`
     agregandose al abrir (a traves del WS estando el overview montado).
 
-- **Bloque 7.2 — Host page (pendiente):**
-  Detalle por agent (ruta `/host.html?agent=...`): estado + `since`,
-  metrica y ultimo valor de cada serie (`GET /api/v1/agents/{id}/metrics`),
-  grafica simple de una serie elegida (`.../metrics/{metric}?limit=...`),
-  timeline de conectividad (`/api/v1/events/history?agent_id=...`),
-  reboots (`/api/v1/agents/{id}/reboots`) y alertas activas del host
-  (`/api/v1/alerts?agent_id=...`).
+- **Bloque 7.2 — Host page (entregado):**
+  Detalle por agent (`host.html?agent=<uuid>`, servida como pagina
+  aparte por el ServeDir; el overview enlaza cada agente en su tabla).
+-   Consume el detalle (`GET /api/v1/agents/{id}`: estado + `since` +
+  `reboot_count`/`last_reboot`), las series con su ultimo valor
+  (`GET /api/v1/agents/{id}/metrics`), la serie elegida para graficar
+  (`GET /api/v1/agents/{id}/metrics/{metric}?limit=300`, filtrable por
+  `entity` que se guarda en el dataset), alertas activas del host
+  (`GET /api/v1/alerts?agent_id=...`) y reboots
+  (`GET /api/v1/agents/{id}/reboots?limit=20`).
+-   Grafica SVG a mano (sin deps): polyline con downsample a 300 puntos,
+  min/max/avg/ultimo y rango temporal.
+-   Timeline del host (`GET /api/v1/events/history?agent_id=...`) con
+  append en vivo por WS filtrando `agent_id` (los `health_result` son
+  globales y quedan en el flujo), refresco debounced del detalle ante
+  eventos; los `reboot_event` no van por WS, se recargan junto con el
+  resto.
+-   Refactor: helpers compartidos pasan a `common.js` (`api`, `relTime`,
+  `badge`, `describeEvent`, ...) usado por `app.js` y `host.js`.
+  Test de existencias del bundle ampliado a `host.html`+`common.js`.
+  Siguen **143 tests**.
 
 - **Bloque 7.3 — Alertas e historicos (pendiente):**
   Vistas completas de gestion y lectura: rules (list/create/delete),

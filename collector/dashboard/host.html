@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Observer &middot; Host</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+  <div class="app">
+    <aside class="sidebar">
+      <h2 class="brand">Observer</h2>
+      <nav>
+        <a class="nav-item active" href="index.html">Overview</a>
+        <a class="nav-item active host-here" href="host.html">Host</a>
+        <a class="nav-item" href="index.html#alerts" title="Bloque 7.3">Alertas e historicos</a>
+      </nav>
+      <button id="logout" class="btn ghost logout">Salir</button>
+    </aside>
+
+    <main class="content">
+      <header class="page-head">
+        <h1 id="host-title">Host</h1>
+        <span class="muted"><a class="nav-item inline" href="index.html">&larr; Overview</a></span>
+      </header>
+
+      <p id="host-status" class="muted">cargando...</p>
+
+      <div class="cards">
+        <div class="card summary">
+          <h3>Alertas activas</h3>
+          <ul id="alerts" class="kv-list"></ul>
+          <p class="muted total" id="alerts-empty">sin alertas activas</p>
+        </div>
+        <div class="card summary">
+          <h3>Datos del host</h3>
+          <ul class="kv-list">
+            <li><span>ID</span><span id="agent-id" class="mono">-</span></li>
+            <li><span>Primera vez</span><span id="host-first">-</span></li>
+            <li><span>Ultima vez</span><span id="host-last">-</span></li>
+            <li><span>Reboots</span><span id="host-reboots">-</span></li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="card">
+        <h3>Series de metricas</h3>
+        <table class="table">
+          <thead>
+            <tr><th>Metrica</th><th>Entidad</th><th>Ultimo valor</th><th>Muestras</th><th></th></tr>
+          </thead>
+          <tbody id="series-body"></tbody>
+        </table>
+        <p class="muted"><button id="reload-series" class="btn ghost small">Recargar</button></p>
+      </div>
+
+      <div class="card hidden" id="chart-card">
+        <div class="chart-head">
+          <h3 id="chart-title">Serie</h3>
+          <button class="btn ghost small" data-chart-close>Cerrar</button>
+        </div>
+        <svg id="chart" viewBox="0 0 800 220" preserveAspectRatio="none"></svg>
+        <p class="muted chart-stats" id="chart-stats"></p>
+      </div>
+
+      <div class="panels">
+        <div class="card">
+          <h3>Actividad reciente</h3>
+          <ul id="timeline" class="timeline"></ul>
+        </div>
+        <div class="card">
+          <h3>Reboots</h3>
+          <ul id="reboots" class="timeline"></ul>
+        </div>
+      </div>
+    </main>
+  </div>
+
+  <script src="common.js"></script>
+  <script src="host.js"></script>
+</body>
+</html>
