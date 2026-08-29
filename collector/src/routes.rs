@@ -25,7 +25,10 @@ use crate::error::ApiError;
 use crate::events::EventBus;
 use crate::health::CreateHealthCheck;
 use crate::models::{HeartbeatPayload, MetricsPayload, Validate};
-use crate::query::{AlertsQuery, CheckResultsQuery, HistoryQuery, RebootsQuery, SeriesQuery};
+use crate::query::{
+    AlertsQuery, CheckResultsQuery, HistoryQuery, RebootsQuery, SeriesQuery, TimelineEntry,
+    TimelineFilter, TimelineQuery,
+};
 use crate::state::{connectivity_state, StateLimits};
 use crate::validation::{utc_from_unix_ts, TimeLimits};
 
@@ -76,6 +79,8 @@ pub fn build_router(state: AppState) -> Router {
             get(check_results_handler),
         )
         .route("/api/v1/events", get(events_handler))
+        .route("/api/v1/events/history", get(event_history_handler))
+        .route("/api/v1/health/summary", get(health_summary_handler))
         .layer(DefaultBodyLimit::max(state.config.max_body_bytes))
         .with_state(state)
 }
@@ -412,6 +417,170 @@ async fn alert_history_handler(
 }
 
 /*
+ * Historial unificado + summary de salud (Fase 6, bloque 6.3).
+ *
+ * `GET /api/v1/events/history` es el timeline del dashboard: cruza las
+ * cuatro fuentes de eventos (alertas, health checks, reboots y
+ * conectividad), en orden cronologico desc y acotado por `limit`. Los
+ * eventos respetan el mismo shape que el WebSocket (type/ts, etc.)
+ *
+ * `GET /api/v1/health/summary` agrega el estado de la plataforma en un
+ * solo GET: conectividad derivada de los agentes (bloque 4.2), estado
+ * actual de los checks (bloque 6.1) y alertas pending/firing (bloque 5).
+ */
+
+fn timeline_entry(
+    kind: &'static str,
+    ts: DateTime<Utc>,
+    payload: serde_json::Value,
+) -> TimelineEntry {
+    TimelineEntry { kind, ts, payload }
+}
+
+async fn event_history_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    params: std::result::Result<Query<TimelineQuery>, QueryRejection>,
+) -> Result<impl IntoResponse> {
+    check_bearer(&headers, &state.config.auth_token)?;
+
+    let filter: TimelineFilter = params
+        .map_err(|_| ApiError::bad_request("invalid_query", "parametros de query invalidos"))?
+        .0
+        .into_filter()?;
+
+    let limit = filter.limit;
+
+    let alerts =
+        db::list_alert_history(&state.pool, filter.agent_id, None, None, None, limit).await?;
+    let health = db::list_recent_health_results(&state.pool, limit).await?;
+    let reboots = db::list_recent_reboots(&state.pool, filter.agent_id, limit).await?;
+    let connectivity = db::list_connectivity_events(&state.pool, filter.agent_id, limit).await?;
+
+    let mut entries: Vec<TimelineEntry> = Vec::with_capacity(alerts.len() * 4);
+    entries.extend(alerts.iter().map(|e| {
+        timeline_entry(
+            "alert_event",
+            e.ts,
+            json!({
+                "type": "alert_event",
+                "rule_id": e.rule_id,
+                "rule_name": e.rule_name,
+                "agent_id": e.agent_id,
+                "from_state": e.from_state,
+                "to_state": e.to_state,
+                "ts": e.ts,
+            }),
+        )
+    }));
+    entries.extend(health.iter().map(|h| {
+        timeline_entry(
+            "health_result",
+            h.ts,
+            json!({
+                "type": "health_result",
+                "check_id": h.check_id,
+                "check_name": h.check_name,
+                "ok": h.ok,
+                "latency_ms": h.latency_ms,
+                "detail": h.detail,
+                "ts": h.ts,
+            }),
+        )
+    }));
+    entries.extend(reboots.iter().map(|r| {
+        timeline_entry(
+            "reboot_event",
+            r.detected_at,
+            json!({
+                "type": "reboot_event",
+                "agent_id": r.agent_id,
+                "uptime_before": r.uptime_before,
+                "uptime_after": r.uptime_after,
+                "ts": r.detected_at,
+            }),
+        )
+    }));
+    entries.extend(connectivity.iter().map(|c| {
+        timeline_entry(
+            "connectivity_event",
+            c.ts,
+            json!({
+                "type": "connectivity_event",
+                "agent_id": c.agent_id,
+                "from_state": c.from_state,
+                "to_state": c.to_state,
+                "ts": c.ts,
+            }),
+        )
+    }));
+
+    let items = crate::query::merge_timeline(entries, limit as usize);
+    let events: Vec<serde_json::Value> = items.into_iter().map(|e| e.payload).collect();
+    tracing::debug!(n = events.len(), "query: historial unificado de eventos");
+    Ok(Json(json!({"events": events, "count": events.len()})))
+}
+
+async fn health_summary_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<impl IntoResponse> {
+    check_bearer(&headers, &state.config.auth_token)?;
+
+    let agents = db::list_agents_liveness(&state.pool).await?;
+    let now = Utc::now();
+    let limits = state.config.state_limits();
+    let mut agents_by_state = std::collections::HashMap::new();
+    for a in &agents {
+        let st = connectivity_state(a.last_seen, now, &limits)
+            .as_str()
+            .to_string();
+        *agents_by_state.entry(st).or_insert(0i64) += 1;
+    }
+
+    let check_states = db::count_check_states(&state.pool).await?;
+    let alert_counts = db::count_alert_states(&state.pool).await?;
+    let checks_total = db::count_health_checks(&state.pool).await?;
+
+    let up = check_state_count(&check_states, "up");
+    let down = check_state_count(&check_states, "down");
+
+    Ok(Json(json!({
+        "agents": {
+            "total": agents.len(),
+            "online": agents_by_state.get("online").copied().unwrap_or(0),
+            "degraded": agents_by_state.get("degraded").copied().unwrap_or(0),
+            "offline": agents_by_state.get("offline").copied().unwrap_or(0),
+        },
+        "checks": {
+            "total": checks_total,
+            "up": up,
+            "down": down,
+            "unknown": checks_total - up - down,
+        },
+        "alerts": {
+            "total": alert_counts.iter().map(|c| c.count).sum::<i64>(),
+            "pending": alert_state_count(&alert_counts, "pending"),
+            "firing": alert_state_count(&alert_counts, "firing"),
+        },
+    })))
+}
+
+fn check_state_count(rows: &[db::CheckStateCount], target: &str) -> i64 {
+    rows.iter()
+        .find(|c| c.state.as_deref() == Some(target))
+        .map(|c| c.count)
+        .unwrap_or(0)
+}
+
+fn alert_state_count(rows: &[db::AlertStateCount], target: &str) -> i64 {
+    rows.iter()
+        .find(|c| c.state.as_str() == target)
+        .map(|c| c.count)
+        .unwrap_or(0)
+}
+
+/*
  * Health checks (Fase 6, bloque 6.1): creacion, listado con estado,
  * borrado e historial de corridas. Mismo bearer token que el resto.
  */
@@ -600,13 +769,6 @@ impl Config {
         TimeLimits {
             future_skew_secs: self.max_future_skew_secs,
             max_past_age_secs: self.max_past_age_secs,
-        }
-    }
-
-    fn state_limits(&self) -> StateLimits {
-        StateLimits {
-            online_secs: self.state_online_secs,
-            degraded_secs: self.state_degraded_secs,
         }
     }
 }

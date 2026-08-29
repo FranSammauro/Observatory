@@ -5,8 +5,10 @@ use sqlx::FromRow;
 use uuid::Uuid;
 
 use crate::alerts::AlertOp;
+use crate::connectivity::ConnectivityTransition;
 use crate::health::{CheckOutcome, CurrentCheckState, StateUpdate};
 use crate::reboot::detect_reboot;
+use crate::state::ConnectivityState;
 
 /*
  * Acceso a PostgreSQL. El pool se crea al startup; las migraciones se
@@ -830,6 +832,213 @@ pub async fn list_health_results(
     )
     .bind(check_id)
     .bind(limit)
+    .fetch_all(pool)
+    .await
+}
+
+/*
+ * Eventos de conectividad (Fase 6, bloque 6.3).
+ *
+ * El runner (connectivity.rs) recorre los agentes del sistema, compara
+ * el estado derivado contra `last_connectivity_state` y, ante un cambio,
+ * aplica la transicion en una sola operacion: registrar el evento +
+ * actualizar el ultimo estado del agent. Sin cambio no hay escritura.
+ */
+
+#[derive(FromRow)]
+pub struct AgentConnectivityRow {
+    pub agent_id: Uuid,
+    pub last_seen: DateTime<Utc>,
+    pub last_connectivity_state: Option<String>,
+}
+
+pub async fn list_agents_connectivity(
+    pool: &PgPool,
+) -> Result<Vec<AgentConnectivityRow>, sqlx::Error> {
+    sqlx::query_as::<_, AgentConnectivityRow>(
+        "SELECT agent_id, last_seen, last_connectivity_state
+         FROM agents
+         ORDER BY agent_id",
+    )
+    .fetch_all(pool)
+    .await
+}
+
+pub async fn apply_connectivity_transitions(
+    pool: &PgPool,
+    transitions: &[ConnectivityTransition],
+) -> Result<(), sqlx::Error> {
+    if transitions.is_empty() {
+        return Ok(());
+    }
+    let mut tx = pool.begin().await?;
+    for t in transitions {
+        sqlx::query(
+            "INSERT INTO connectivity_events (agent_id, from_state, to_state, ts)
+             VALUES ($1, $2, $3, now())",
+        )
+        .bind(t.agent_id)
+        .bind(t.from_state.as_ref().map(ConnectivityState::as_str))
+        .bind(t.to_state.as_str())
+        .execute(&mut *tx)
+        .await?;
+
+        sqlx::query("UPDATE agents SET last_connectivity_state = $2 WHERE agent_id = $1")
+            .bind(t.agent_id)
+            .bind(t.to_state.as_str())
+            .execute(&mut *tx)
+            .await?;
+    }
+    tx.commit().await
+}
+
+#[derive(Serialize, FromRow)]
+pub struct ConnectivityEventRow {
+    pub id: i64,
+    pub agent_id: Uuid,
+    pub from_state: Option<String>,
+    pub to_state: String,
+    pub ts: DateTime<Utc>,
+}
+
+/* Historial de transiciones de conectividad de un agent, para el
+ * detalle de host y el timeline unificado. */
+pub async fn list_connectivity_events(
+    pool: &PgPool,
+    agent_id: Option<Uuid>,
+    limit: i64,
+) -> Result<Vec<ConnectivityEventRow>, sqlx::Error> {
+    sqlx::query_as::<_, ConnectivityEventRow>(
+        "SELECT id, agent_id, from_state, to_state, ts
+         FROM connectivity_events
+         WHERE ($1::uuid IS NULL OR agent_id = $1)
+         ORDER BY ts DESC, id DESC
+         LIMIT $2",
+    )
+    .bind(agent_id)
+    .bind(limit)
+    .fetch_all(pool)
+    .await
+}
+
+/*
+ * Historial unificado (Fase 6, bloque 6.3): la vista "todo lo que paso"
+ * del dashboard, fusionando las cuatro fuentes de eventos
+ * (alertas, health, reboots y conectividad) ordenadas por ts DESC.
+ * Cada fuente aporta filas con su `ts`; el merge (query.rs) las cruza en
+ * Rust para no pagar un UNION ALL con formas heterogeneas.
+ */
+
+#[derive(Serialize, FromRow)]
+pub struct HealthTimelineRow {
+    pub check_id: i64,
+    pub check_name: String,
+    pub ts: DateTime<Utc>,
+    pub ok: bool,
+    pub latency_ms: i64,
+    pub detail: String,
+}
+
+pub async fn list_recent_health_results(
+    pool: &PgPool,
+    limit: i64,
+) -> Result<Vec<HealthTimelineRow>, sqlx::Error> {
+    sqlx::query_as::<_, HealthTimelineRow>(
+        "SELECT r.check_id, c.name AS check_name, r.ts, r.ok, r.latency_ms, r.detail
+         FROM health_check_results r
+         JOIN health_checks c ON c.id = r.check_id
+         ORDER BY r.ts DESC, r.id DESC
+         LIMIT $1",
+    )
+    .bind(limit)
+    .fetch_all(pool)
+    .await
+}
+
+#[derive(Serialize, FromRow)]
+pub struct RebootTimelineRow {
+    pub id: i64,
+    pub agent_id: Uuid,
+    pub detected_at: DateTime<Utc>,
+    pub sample_ts: DateTime<Utc>,
+    pub uptime_before: f64,
+    pub uptime_after: f64,
+}
+
+pub async fn list_recent_reboots(
+    pool: &PgPool,
+    agent_id: Option<Uuid>,
+    limit: i64,
+) -> Result<Vec<RebootTimelineRow>, sqlx::Error> {
+    sqlx::query_as::<_, RebootTimelineRow>(
+        "SELECT id, agent_id, detected_at, sample_ts, uptime_before, uptime_after
+         FROM reboot_events
+         WHERE ($1::uuid IS NULL OR agent_id = $1)
+         ORDER BY detected_at DESC
+         LIMIT $2",
+    )
+    .bind(agent_id)
+    .bind(limit)
+    .fetch_all(pool)
+    .await
+}
+
+/*
+ * Summary de salud (Fase 6, bloque 6.3): conteos agregados para el
+ * overview del dashboard. Los estados de conectividad se derivan en el
+ * handler con la misma funcion pura que el resto del query API (bloque
+ * 4.2); aca se traen las filas minimas: agents (last_seen), checks
+ * (estado actual) y el estado de las alertas activas.
+ */
+
+#[derive(FromRow)]
+pub struct AgentLivenessRow {
+    pub last_seen: DateTime<Utc>,
+}
+
+pub async fn list_agents_liveness(pool: &PgPool) -> Result<Vec<AgentLivenessRow>, sqlx::Error> {
+    sqlx::query_as::<_, AgentLivenessRow>("SELECT last_seen FROM agents")
+        .fetch_all(pool)
+        .await
+}
+
+#[derive(Serialize, FromRow)]
+pub struct CheckStateCount {
+    pub state: Option<String>,
+    pub count: i64,
+}
+
+/* Checks definidos (para el total del summary). */
+pub async fn count_health_checks(pool: &PgPool) -> Result<i64, sqlx::Error> {
+    sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM health_checks")
+        .fetch_one(pool)
+        .await
+}
+
+pub async fn count_check_states(pool: &PgPool) -> Result<Vec<CheckStateCount>, sqlx::Error> {
+    sqlx::query_as::<_, CheckStateCount>(
+        "SELECT s.state, COUNT(*)::bigint AS count
+         FROM health_check_states s
+         GROUP BY s.state
+         ORDER BY s.state",
+    )
+    .fetch_all(pool)
+    .await
+}
+
+#[derive(Serialize, FromRow)]
+pub struct AlertStateCount {
+    pub state: String,
+    pub count: i64,
+}
+
+pub async fn count_alert_states(pool: &PgPool) -> Result<Vec<AlertStateCount>, sqlx::Error> {
+    sqlx::query_as::<_, AlertStateCount>(
+        "SELECT state, COUNT(*)::bigint AS count
+         FROM alerts
+         GROUP BY state
+         ORDER BY state",
+    )
     .fetch_all(pool)
     .await
 }

@@ -4,9 +4,11 @@ Collector central en **Rust (Axum)** que recibe los payloads que emite el
 agent C (`observer-agent`), los valida, los autentica por bearer token, y
 los persiste en PostgreSQL.
 
-> Estado actual: **Fase 6** (en curso) — health checks HTTP/TCP (6.1,
-> entregado). Fase 5 entera entregada (alert engine: 5.1, 5.2 y 5.3) y
-> Fases 4, 4.2 y 4.3 tambien. Ver [`../PHASES.md`](../PHASES.md).
+> Estado actual: **Fase 6 entregada** — health checks HTTP/TCP (6.1),
+> WebSocket de eventos realtime (6.2) e historial unificado + summary de
+> salud + eventos de conectividad (6.3). Fase 5 entera entregada (alert
+> engine: 5.1, 5.2 y 5.3) y Fases 4, 4.2 y 4.3 tambien. Ver
+> [`../PHASES.md`](../PHASES.md).
 
 ## Arquitectura
 
@@ -125,8 +127,8 @@ declarativamente, evaluados por el propio collector, mismo bearer token:
     existe (UNIQUE), `400 invalid_check_kind` / `invalid_check_interval`
     / `invalid_check_timeout` / `invalid_check_target` segun el campo
     invalido.
-- `GET /api/v1/health/checks` — lista de checks (con su **estado
-  simple) con su **estado derivado** (`state` `up|down|null`, `since`,
+- `GET /api/v1/health/checks` — lista de checks con su **estado
+  derivado** (`state` `up|down|null`, `since`,
   `last_checked_at`, `last_ok`, `last_latency_ms`, `last_detail`).
 - `DELETE /api/v1/health/checks/{check_id}` — borrar un check; `404
   unknown_check` / `400 invalid_check_id`. Sus resultados y estado se
@@ -147,6 +149,11 @@ API), como JSON con `type` como tag:
 - `alert_event` — una por transicion de alerta: `{type, rule_id,
   rule_name, agent_id, from_state, to_state, ts}` (INACTIVE/PENDING →
   PENDING, PENDING → FIRING, FIRING → PENDING, FIRING → RESOLVED).
+- `connectivity_event` — una por transicion del estado derivado de un
+  agent (bloque 6.3): `{type, agent_id, from_state, to_state, ts}`
+  (online/degraded/offline; `from_state` NULL en la primera
+  observacion). Lo publica el runner de conectividad, no persiste NADA
+  por si mismo.
 - `events_lagged` — si el cliente no consume a tiempo, el broadcast
   descarta los eventos atrasados y se avisa `{type, dropped}` antes de
   seguir.
@@ -156,6 +163,23 @@ navegador no deja setear headers, el token se acepta tambien por query
 param `?token=...`; se valida antes del upgrade (`401` sin token
 valido). Los eventos se publican despues del commit en DB, con la misma
 atomicidad que los datos persistidos.
+
+Historial unificado (bloque 6.3) — el timeline del dashboard, mismo
+bearer token:
+
+- `GET /api/v1/events/history` — cruza las cuatro fuentes de eventos
+  (alertas, health checks, reboots y conectividad) en orden cronologico
+  desc y devuelve `{events, count}`. Cada evento mantiene el mismo shape
+  que el WebSocket (campo `type`: `alert_event` | `health_result` |
+  `reboot_event` | `connectivity_event`, mas `ts`). Query params:
+  `agent_id` (UUID, opcional; filtra alertas/reboots/conectividad) y
+  `limit` (default 50, tope 1000; `400 invalid_limit` fuera de rango).
+- `GET /api/v1/health/summary` — agrega el estado de la plataforma en un
+  GET: `{agents: {total, online, degraded, offline}, checks: {total, up,
+  down, unknown}, alerts: {total, pending, firing}}`. La conectividad de
+  los agents usa la misma funcion derivada que el query API (bloque 4.2);
+  `unknown` = checks definidos que aun no tienen estado (nunca corrieron
+  o `enabled = false`).
 
 Evaluacion (bloque 6.1): el runner (`health::spawn_health_runner`, en
 una tarea tokio) consulta cada `OBS_HEALTH_POLL_SECS` los checks
@@ -196,6 +220,7 @@ Contrato de payloads: ver [`../agent/src/protocol.c`](../agent/src/protocol.c)
 | `OBS_HEALTH_POLL_SECS` | `1` | periodo del runner de health checks (bloque 6.1) |
 | `OBS_HEALTH_DEFAULT_TIMEOUT_SECS` | `5` | timeout por defecto de un check (1-300), si el payload no trae `timeout_secs` (bloque 6.1) |
 | `OBS_WS_CHANNEL_CAPACITY` | `256` | capacidad del canal broadcast de eventos WS; suscriptores lentos descartan eventos (bloque 6.2) |
+| `OBS_CONNECTIVITY_POLL_SECS` | `5` | periodo del runner de conectividad (bloque 6.3); >= 1, fail-fast al arrancar |
 | `RUST_LOG` | `info` | nivel de log (tracing) |
 
 ## Build y tests
@@ -203,7 +228,7 @@ Contrato de payloads: ver [`../agent/src/protocol.c`](../agent/src/protocol.c)
 ```sh
 cargo build            # debug
 cargo build --release  # release (LTO + codegen-units=1)
-cargo test             # 120 tests unitarios (sin DB)
+cargo test             # 140 tests unitarios (sin DB)
 cargo clippy           # lint, sin warnings
 cargo fmt              # formato
 ```
@@ -261,6 +286,12 @@ agent_token = tu-token
   deduplicado por PK `check_id`: `state` (`up|down`), `since`,
   `last_checked_at`, `last_ok`, `last_latency_ms`, `last_detail`.
   INACTIVO = ausencia de fila (no corrió aun o `enabled = false`).
+- `connectivity_events` — historial de transiciones de conectividad
+  (bloque 6.3): una fila por transicion del estado derivado
+  (`from_state` NULL en la primera observacion, `to_state`
+  `online|degraded|offline`, `ts`); FK a `agents` con ON DELETE CASCADE,
+  indice por `(agent_id, ts)`. `agents.last_connectivity_state` guarda el
+  ultimo estado observado por el runner (NULL hasta la primera pasada).
 
 ## Limites de cardinalidad
 

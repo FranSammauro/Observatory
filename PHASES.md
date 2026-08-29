@@ -28,13 +28,13 @@ desarrollo con commits progresivos.
       evaluador (entregado), **5.2** máquina de estados + hysteresis
       (entregado), **5.3** deduplicación + historial + query API
       (entregado). Ver detalle abajo.
-- [ ] **Fase 6 — Health checks + WebSocket**
+- [x] **Fase 6 — Health checks + WebSocket**
       Checks HTTP/TCP, eventos realtime. Subdividida en 3 bloques:
       **6.1** health checks HTTP/TCP (definiciones + ejecutor +
       resultados + estado + query API, entregado), **6.2** WebSocket de
       eventos realtime (canal + publicación desde alertas y health
       checks, entregado), **6.3** historial unificado + summary de salud +
-      eventos de conectividad. Ver detalle abajo.
+      eventos de conectividad (entregado). Ver detalle abajo.
 - [ ] **Fase 7 — Dashboard**
       Overview, host page, alertas, históricos.
 - [ ] **Fase 8 — Hardening y benchmark experimental**
@@ -573,3 +573,89 @@ desarrollo con commits progresivos.
     los eventos de alerta en orden junto con los health_result del mismo
     intervalo.
   - 120 tests en verde, build/clippy/fmt limpios.
+
+- **Bloque 6.3 — Historial unificado + summary de salud + eventos de
+  conectividad (entregado):**
+  - Migracion `0007_connectivity_events.sql`: columna
+    `agents.last_connectivity_state` (ultimo estado derivado observado
+    por el runner; NULL hasta la primera pasada) y tabla
+    `connectivity_events` (`id`, `agent_id` FK CASCADE, `from_state`
+    nullable, `to_state` CHECK `online|degraded|offline`, `ts` default
+    now(), indice `(agent_id, ts DESC)`).
+  - `src/connectivity.rs`:
+    - `detect_transitions` (pura): para cada agente compara el estado
+      derivado (bloque 4.2, misma funcion `connectivity_state`) contra
+      `last_connectivity_state`; si difiere -> `ConnectivityTransition`
+      (from/to). La primera observacion (columna NULL) cuenta como
+      transicion desde NULL, igual que la creacion de alerta en
+      `alert_events`.
+    - `spawn_connectivity_runner`/`run_cycle`: task de tokio que cada
+      `OBS_CONNECTIVITY_POLL_SECS` (default 5) recorre los agents,
+      detecta transiciones y las persiste y publica al bus. Sin cambios
+      no escribe nada. `ts` del evento = hora del ciclo que lo detecto
+      (filosofia last_seen, ADR-0003).
+    - `apply_connectivity_transitions` (db.rs): en una transaccion
+      INSERT del evento + UPDATE de `agents.last_connectivity_state`;
+      los `connectivity_event` al WebSocket se publican solo despues del
+      commit (misma atomicidad que alertas/health).
+  - Historial unificado `GET /api/v1/events/history` (query API, mismo
+    bearer token):
+    - `src/query.rs`: `TimelineQuery` (`agent_id` + `limit`, default 50,
+      max 1000 con `DEFAULT_EVENTS_HISTORY_LIMIT`/
+      `MAX_EVENTS_HISTORY_LIMIT`) y `merge_timeline` (pura): concatena
+      las cuatro fuentes, ordena por `ts` desc y corta a `limit`.
+    - `src/db.rs`: `list_recent_health_results` (JOIN con checks para
+      `check_name`), `list_recent_reboots` (con `agent_id`),
+      `list_connectivity_events` (`agent_id` opcional por parametro
+      `($1::uuid IS NULL OR agent_id = $1)`).
+    - El handler arma `TimelineEntry {kind, ts, payload}` por fuente
+      (`alert_event`, `health_result`, `reboot_event`,
+      `connectivity_event`) con el mismo shape que el WebSocket y
+      devuelve `{events, count}`. `agent_id` filtra alertas, reboots y
+      conectividad; salud se trae acotada por `limit`.
+  - Summary de salud `GET /api/v1/health/summary`:
+    - `db.rs`: `list_agents_liveness` (last_seen), `count_check_states`
+      (estados de checks), `count_alert_states` (pending/firing),
+      `count_health_checks` (total).
+    - El handler deriva la conectividad de los agents con la misma
+      funcion del query API y agrega `{agents: {total, online, degraded,
+      offline}, checks: {total, up, down, unknown}, alerts: {total,
+      pending, firing}}`. `unknown` = checks definidos sin estado aun
+      (`health_check_states` solo guarda up/down).
+  - `src/events.rs`: variante `ConnectivityEvent` (tag
+    `connectivity_event`) + constructor `Event::connectivity` + tests de
+    serializacion (from NULL en la primera observacion).
+  - `src/config.rs`: `OBS_CONNECTIVITY_POLL_SECS` (>= 1), fail-fast al
+    arrancar; `state_limits()` movido aca y publico (lo comparten
+    handlers de query y el runner). `src/state.rs`:
+    `connectivity_state_from_str` y `ConnectivityState::as_str`.
+  - Tests: 20 nuevos (connectivity transition detection, state parse,
+    timeline query/merge, config poll validation, event serialization).
+    **140 en total**.
+
+**Validado en este entorno (bloque 6.3):**
+
+- Postgres real + collector con `OBS_CONNECTIVITY_POLL_SECS=2`,
+  `OBS_STATE_ONLINE_SECS=5` y `OBS_STATE_DEGRADED_SECS=15`:
+  - Migracion 0007 aplicada en vivo (`_sqlx_migrations` version 7).
+  - El agente stale existente (sin `last_connectivity_state`) -> primera
+    observacion `NULL -> offline` en `connectivity_events` y por WS.
+  - Cadena completa de transiciones en DB y en el cliente WebSocket:
+    `offline -> online` (7s), `online -> degraded` (+6s) y
+    `degraded -> offline` (+10s) con los umbrales cortos, en tiempo real
+    y en orden; luego `offline -> online -> degraded` tomada viva tras un
+    heartbeat.
+  - `GET /api/v1/events/history` (sin filtro): timeline cruzando las
+    fuentes por `ts` desc (health_result, connectivity_event y
+    alert_event con `rule_name`/`from_state`/`to_state`); `?limit=1000`
+    -> 434 eventos (424 health + 6 alert + 4 connectivity).
+  - `GET /api/v1/events/history?agent_id=...&limit=2` filtra y acota.
+  - `GET /api/v1/health/summary`: `{agents:{total,online,degraded,
+    offline}, checks:{total,up,down,unknown}, alerts:{total,pending,
+    firing}}` consistente con el estado real (1 agente offline tras
+    vencer last_seen; http-root down / pg-port up; 0 alertas activas).
+    Tras un heartbeat el agente pasa a un estado reciente reflejado en la
+    agregacion.
+  - Negativos: endpoints sin token -> 401; `limit=0` -> 400
+    `invalid_limit`; `agent_id=nope` -> 400 `invalid_agent_id`.
+  - 140 tests en verde, build/clippy/fmt limpios.

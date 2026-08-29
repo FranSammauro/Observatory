@@ -1,6 +1,7 @@
 use std::env;
 
 use crate::events::WS_CHANNEL_CAPACITY_DEFAULT;
+use crate::state::StateLimits;
 
 pub const PROTOCOL_VERSION: i32 = 1;
 pub const MAX_ARRAY_ENTRIES: usize = 16;
@@ -29,6 +30,12 @@ pub const MAX_ALERT_HISTORY_LIMIT: i64 = 1_000;
  * intervalo, eventos de tamano acotado; mismo criterio que reboots. */
 pub const DEFAULT_HEALTH_RESULTS_LIMIT: i64 = 50;
 pub const MAX_HEALTH_RESULTS_LIMIT: i64 = 1_000;
+
+/* Historial unificado (Fase 6, bloque 6.3): ultimos eventos del sistema
+ * fusionando alertas + health + reboots + conectividad. Mismo criterio
+ * que los timelines individuales. */
+pub const DEFAULT_EVENTS_HISTORY_LIMIT: i64 = 50;
+pub const MAX_EVENTS_HISTORY_LIMIT: i64 = 1_000;
 
 /*
  * WebSocket de eventos realtime (bloque 6.2): capacidad de la cola por
@@ -69,6 +76,7 @@ pub struct Config {
     pub health_poll_secs: i64,
     pub health_default_timeout_secs: i64,
     pub ws_channel_capacity: usize,
+    pub connectivity_poll_secs: i64,
 }
 
 fn parse_u32(name: &str, default: u32) -> Result<u32, String> {
@@ -129,6 +137,7 @@ impl Config {
             "OBS_WS_CHANNEL_CAPACITY",
             WS_CHANNEL_CAPACITY_DEFAULT as u32,
         )? as usize;
+        let connectivity_poll_secs = parse_i64("OBS_CONNECTIVITY_POLL_SECS", 5)?;
 
         validate_state_limits(state_online_secs, state_degraded_secs)?;
         validate_reboot_drop(reboot_min_uptime_drop_secs)?;
@@ -137,6 +146,7 @@ impl Config {
         validate_health_poll(health_poll_secs)?;
         validate_health_timeout(health_default_timeout_secs)?;
         validate_ws_capacity(ws_channel_capacity)?;
+        validate_connectivity_poll(connectivity_poll_secs)?;
 
         Ok(Self {
             listen_addr,
@@ -155,7 +165,17 @@ impl Config {
             health_poll_secs,
             health_default_timeout_secs,
             ws_channel_capacity,
+            connectivity_poll_secs,
         })
+    }
+
+    /* Umbrales de la maquina de conectividad (bloque 4.2): compartidos
+     * por los handlers de query y el runner de conectividad (6.3). */
+    pub fn state_limits(&self) -> StateLimits {
+        StateLimits {
+            online_secs: self.state_online_secs,
+            degraded_secs: self.state_degraded_secs,
+        }
     }
 }
 
@@ -243,6 +263,18 @@ pub fn validate_ws_capacity(capacity: usize) -> Result<(), String> {
     } else {
         Err("OBS_WS_CHANNEL_CAPACITY debe ser mayor que 0".to_string())
     }
+}
+
+/*
+ * Runner de conectividad (bloque 6.3): detecta transiciones del estado
+ * derivado ONLINE/DEGRADED/OFFLINE. El intervalo no puede ser 0 ni
+ * negativo; 5s default cubre bien la ventana de los umbrales (15s/60s).
+ */
+pub fn validate_connectivity_poll(poll_secs: i64) -> Result<(), String> {
+    if poll_secs < 1 {
+        return Err("OBS_CONNECTIVITY_POLL_SECS debe ser mayor o igual a 1".to_string());
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -341,5 +373,17 @@ mod tests {
     #[test]
     fn ws_capacity_rejects_zero() {
         assert!(validate_ws_capacity(0).is_err());
+    }
+
+    #[test]
+    fn connectivity_poll_accepts_positive() {
+        assert!(validate_connectivity_poll(1).is_ok());
+        assert!(validate_connectivity_poll(5).is_ok());
+    }
+
+    #[test]
+    fn connectivity_poll_rejects_zero_and_negative() {
+        assert!(validate_connectivity_poll(0).is_err());
+        assert!(validate_connectivity_poll(-1).is_err());
     }
 }

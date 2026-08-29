@@ -49,9 +49,10 @@ token y persistencia en PostgreSQL. Ver [`agent/README.md`](agent/README.md)
 y [`collector/README.md`](collector/README.md). Decisiones de ingestion:
 [`docs/adr/0003-collector-ingestion.md`](docs/adr/0003-collector-ingestion.md).
 
-Falta del camino hacia producción: query API + estados de conectividad
-(Fase 4), alert engine (Fase 5), health checks + WebSocket (Fase 6),
-dashboard (Fase 7), y hardening/TLS/benchmark (Fase 8).
+Falta del camino hacia producción: dashboard (Fase 7), y
+hardening/TLS/benchmark (Fase 8). Ya entregadas: query API + estados de
+conectividad (Fase 4), alert engine (Fase 5) y health checks + eventos
+realtime + historial unificado + summary (Fase 6).
 
 TLS todavía no está implementado (queda para la Fase 8 de hardening) —
 ver [`docs/adr/0002-transport-protocol.md`](docs/adr/0002-transport-protocol.md).

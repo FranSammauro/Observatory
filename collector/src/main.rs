@@ -1,6 +1,7 @@
 mod alerts;
 mod auth;
 mod config;
+mod connectivity;
 mod db;
 mod error;
 mod events;
@@ -71,7 +72,16 @@ async fn main() {
         Arc::clone(&state.config),
         event_bus.clone(),
     );
-    health::spawn_health_runner(state.pool.clone(), Arc::clone(&state.config), event_bus);
+    health::spawn_health_runner(
+        state.pool.clone(),
+        Arc::clone(&state.config),
+        event_bus.clone(),
+    );
+    connectivity::spawn_connectivity_runner(
+        state.pool.clone(),
+        Arc::clone(&state.config),
+        event_bus,
+    );
     let app = build_router(state);
 
     tracing::info!("collector listening on {}", listener.local_addr().unwrap());

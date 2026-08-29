@@ -3,9 +3,9 @@ use serde::Deserialize;
 use uuid::Uuid;
 
 use crate::config::{
-    DEFAULT_ALERT_HISTORY_LIMIT, DEFAULT_HEALTH_RESULTS_LIMIT, DEFAULT_REBOOTS_LIMIT,
-    DEFAULT_SERIES_POINTS, MAX_ALERT_HISTORY_LIMIT, MAX_HEALTH_RESULTS_LIMIT, MAX_REBOOTS_LIMIT,
-    MAX_SERIES_POINTS,
+    DEFAULT_ALERT_HISTORY_LIMIT, DEFAULT_EVENTS_HISTORY_LIMIT, DEFAULT_HEALTH_RESULTS_LIMIT,
+    DEFAULT_REBOOTS_LIMIT, DEFAULT_SERIES_POINTS, MAX_ALERT_HISTORY_LIMIT,
+    MAX_EVENTS_HISTORY_LIMIT, MAX_HEALTH_RESULTS_LIMIT, MAX_REBOOTS_LIMIT, MAX_SERIES_POINTS,
 };
 use crate::error::ApiError;
 
@@ -225,6 +225,68 @@ impl CheckResultsQuery {
             MAX_HEALTH_RESULTS_LIMIT,
         )
     }
+}
+
+/*
+ * Historial unificado (Fase 6, bloque 6.3). Consulta del timeline
+ * `GET /api/v1/events/history`: recorta por agent (opcional) y devuelve
+ * los ultimos `limit` eventos cruzando las cuatro fuentes (alertas,
+ * health, reboots, conectividad) ordenados por timestamp desc. El merge
+ * vive en Rust (merge_timeline) para no pagar un UNION ALL heterogeneo
+ * en SQL y poder testearlo puro.
+ *
+ * `limit` reusa el rango de histories previos: default 50, maximo 1000.
+ * Nota: el agent_id se aplica en los handlers de cada fuente; cada una
+ * trae hasta `limit` filas y el merge corta al total pedido.
+ */
+
+#[derive(Debug, Deserialize)]
+pub struct TimelineQuery {
+    pub agent_id: Option<String>,
+    pub limit: Option<i64>,
+}
+
+impl TimelineQuery {
+    pub fn into_filter(self) -> Result<TimelineFilter, ApiError> {
+        let agent_id = self.agent_id.map(|s| parse_agent_uuid(&s)).transpose()?;
+        let limit = parse_limit(
+            self.limit,
+            DEFAULT_EVENTS_HISTORY_LIMIT,
+            MAX_EVENTS_HISTORY_LIMIT,
+        )?;
+        Ok(TimelineFilter { agent_id, limit })
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct TimelineFilter {
+    pub agent_id: Option<Uuid>,
+    pub limit: i64,
+}
+
+/*
+ * Un elemento del timeline unificado: `kind` dice la fuente (alert_event,
+ * health_result, reboot_event, connectivity_event) y `ts` es la marca que
+ * ordena. El resto de los campos va en el JSON plano de cada evento
+ * (mismo shape que en el WebSocket donde corresponde).
+ */
+#[derive(Debug, Clone, PartialEq)]
+pub struct TimelineEntry {
+    pub kind: &'static str,
+    pub ts: DateTime<Utc>,
+    pub payload: serde_json::Value,
+}
+
+/*
+ * Merge de las cuatro fuentes (pura): concatena, ordena por `ts`
+ * descendentemente y corta a `limit`. Orden estable entre filas con el
+ * mismo ts: la fuente queda como llego (cada una ya viene ordenada).
+ */
+pub fn merge_timeline(entries: Vec<TimelineEntry>, limit: usize) -> Vec<TimelineEntry> {
+    let mut merged = entries;
+    merged.sort_by_key(|e| std::cmp::Reverse(e.ts));
+    merged.truncate(limit);
+    merged
 }
 
 #[cfg(test)]
@@ -487,5 +549,81 @@ mod tests {
         }
         .into_limit();
         assert!(r.is_err());
+    }
+
+    #[test]
+    fn timeline_defaults() {
+        let f = TimelineQuery {
+            agent_id: None,
+            limit: None,
+        }
+        .into_filter()
+        .unwrap();
+        assert_eq!(f.agent_id, None);
+        assert_eq!(f.limit, DEFAULT_EVENTS_HISTORY_LIMIT);
+    }
+
+    #[test]
+    fn timeline_limit_is_validated() {
+        let r = TimelineQuery {
+            agent_id: None,
+            limit: Some(0),
+        }
+        .into_filter();
+        assert!(r.is_err());
+
+        let f = TimelineQuery {
+            agent_id: None,
+            limit: Some(MAX_EVENTS_HISTORY_LIMIT),
+        }
+        .into_filter()
+        .unwrap();
+        assert_eq!(f.limit, MAX_EVENTS_HISTORY_LIMIT);
+    }
+
+    #[test]
+    fn timeline_invalid_agent_is_rejected() {
+        let r = TimelineQuery {
+            agent_id: Some("nope".into()),
+            limit: None,
+        }
+        .into_filter();
+        assert_eq!(r.unwrap_err().code, "invalid_agent_id");
+    }
+
+    fn entry(kind: &'static str, ts: &str) -> TimelineEntry {
+        TimelineEntry {
+            kind,
+            ts: DateTime::parse_from_rfc3339(ts)
+                .unwrap()
+                .with_timezone(&Utc),
+            payload: serde_json::json!({"ts": ts}),
+        }
+    }
+
+    #[test]
+    fn merge_timeline_sorts_desc_and_truncates() {
+        let entries = vec![
+            entry("alert_event", "2024-07-03T09:46:40Z"),
+            entry("health_result", "2024-07-03T09:47:00Z"),
+            entry("reboot_event", "2024-07-03T09:46:00Z"),
+            entry("connectivity_event", "2024-07-03T09:47:30Z"),
+        ];
+        let out = merge_timeline(entries, 2);
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].kind, "connectivity_event");
+        assert_eq!(out[1].kind, "health_result");
+    }
+
+    #[test]
+    fn merge_timeline_keeps_everything_under_limit() {
+        let entries = vec![entry("alert_event", "2024-07-03T09:46:40Z")];
+        let out = merge_timeline(entries, 50);
+        assert_eq!(out.len(), 1);
+    }
+
+    #[test]
+    fn merge_timeline_empty_input() {
+        assert!(merge_timeline(vec![], 10).is_empty());
     }
 }

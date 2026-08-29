@@ -28,6 +28,7 @@ pub const WS_CHANNEL_CAPACITY_DEFAULT: usize = 256;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
+#[allow(clippy::enum_variant_names)] // los nombres repiten el tag del serde
 pub enum Event {
     /* Transicion real de una alerta (lo mismo que persiste
      * `apply_alert_steps` en `alert_events`: creacion, promocion o
@@ -52,6 +53,15 @@ pub enum Event {
         state_changed: bool,
         state: Option<String>,
         since: Option<DateTime<Utc>>,
+    },
+    /* Transicion del estado de conectividad derivado de un agent
+     * (ONLINE/DEGRADED/OFFLINE, bloque 6.3): el runner detecta un cambio
+     * contra el ultimo estado persistido y lo emite al bus. */
+    ConnectivityEvent {
+        agent_id: Uuid,
+        from_state: Option<String>,
+        to_state: String,
+        ts: DateTime<Utc>,
     },
 }
 
@@ -100,6 +110,18 @@ impl Event {
             state_changed,
             state: Some(state.to_string()),
             since: Some(since),
+        }
+    }
+
+    /* Evento de cambio de estado de conectividad de un agent (bloque
+     * 6.3). `from` es None en la primera observacion (no sabemos el
+     * estado previo). */
+    pub fn connectivity(agent_id: Uuid, from: Option<&str>, to: &str, ts: DateTime<Utc>) -> Self {
+        Event::ConnectivityEvent {
+            agent_id,
+            from_state: from.map(str::to_string),
+            to_state: to.to_string(),
+            ts,
         }
     }
 
@@ -188,6 +210,25 @@ mod tests {
             Event::alert(1, "a", agent(), None, "pending", ts()).to_json(),
             Event::health(1, "a", true, 1, "d", ts(), false, "up", ts()).to_json()
         );
+    }
+
+    #[test]
+    fn connectivity_event_serializes_with_type_tag() {
+        let e = Event::connectivity(agent(), Some("online"), "degraded", ts());
+        let value: serde_json::Value = serde_json::from_str(&e.to_json()).unwrap();
+        assert_eq!(value["type"], "connectivity_event");
+        assert_eq!(value["agent_id"], agent().to_string());
+        assert_eq!(value["from_state"], "online");
+        assert_eq!(value["to_state"], "degraded");
+        assert_eq!(value["ts"], "2024-07-03T09:46:40Z");
+    }
+
+    #[test]
+    fn connectivity_event_first_observation_has_null_from() {
+        let e = Event::connectivity(agent(), None, "online", ts());
+        let value: serde_json::Value = serde_json::from_str(&e.to_json()).unwrap();
+        assert_eq!(value["from_state"], serde_json::Value::Null);
+        assert_eq!(value["to_state"], "online");
     }
 
     #[tokio::test]

@@ -36,6 +36,18 @@ impl ConnectivityState {
     }
 }
 
+/* Parsea el estado persistido (`agents.last_connectivity_state`): NULL o
+ * un valor desconocido se trata como "aun no observado". El CHECK de la
+ * DB ya limita los valores validos; aca solo se decide el None. */
+pub fn connectivity_state_from_str(s: Option<&str>) -> Option<ConnectivityState> {
+    match s {
+        Some("online") => Some(ConnectivityState::Online),
+        Some("degraded") => Some(ConnectivityState::Degraded),
+        Some("offline") => Some(ConnectivityState::Offline),
+        _ => None,
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct StateLimits {
     pub online_secs: i64,
@@ -126,5 +138,36 @@ mod tests {
             connectivity_state(last_seen, now, &limits()),
             ConnectivityState::Online
         );
+    }
+
+    #[test]
+    fn parse_known_states() {
+        assert_eq!(
+            connectivity_state_from_str(Some("online")),
+            Some(ConnectivityState::Online)
+        );
+        assert_eq!(
+            connectivity_state_from_str(Some("degraded")),
+            Some(ConnectivityState::Degraded)
+        );
+        assert_eq!(
+            connectivity_state_from_str(Some("offline")),
+            Some(ConnectivityState::Offline)
+        );
+    }
+
+    #[test]
+    fn parse_null_or_unknown_is_none() {
+        assert_eq!(connectivity_state_from_str(None), None);
+        assert_eq!(connectivity_state_from_str(Some("")), None);
+        assert_eq!(connectivity_state_from_str(Some("up")), None);
+    }
+
+    #[test]
+    fn as_str_roundtrips() {
+        for s in ["online", "degraded", "offline"] {
+            let parsed = connectivity_state_from_str(Some(s)).unwrap();
+            assert_eq!(parsed.as_str(), s);
+        }
     }
 }
