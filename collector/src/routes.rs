@@ -16,6 +16,7 @@ use serde::Deserialize;
 use serde_json::json;
 use sqlx::PgPool;
 use tokio::sync::broadcast;
+use tower_http::services::{ServeDir, ServeFile};
 
 use crate::alerts::CreateRule;
 use crate::auth::{check_bearer, check_bearer_str};
@@ -42,6 +43,8 @@ pub struct AppState {
 type Result<T> = std::result::Result<T, ApiError>;
 
 pub fn build_router(state: AppState) -> Router {
+    let dashboard_dir = state.config.dashboard_dir.clone();
+    let index_path = format!("{dashboard_dir}/index.html");
     Router::new()
         .route("/healthz", get(healthz))
         .route("/api/v1/agents/heartbeat", post(heartbeat_handler))
@@ -83,7 +86,20 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/v1/health/summary", get(health_summary_handler))
         .layer(DefaultBodyLimit::max(state.config.max_body_bytes))
         .with_state(state)
+        .fallback_service(
+            ServeDir::new(&dashboard_dir).not_found_service(ServeFile::new(index_path)),
+        )
 }
+
+/*
+ * Dashboard (Fase 7, bloque 7.1): la UI estatica (HTML/CSS/JS vanilla)
+ * vive en `OBS_DASHBOARD_DIR` (default `dashboard/`, relativo a CWD) y se
+ * sirve por cualquier ruta no capturada por la API. Sirve `index.html`
+ * como SPA fallback para gaps de ruta del navegador; las rutas explicitas
+ * (la API y `/healthz`) siempre ganan por precedencia. `index.html` al
+ * servir un path de la SPA que no existe en disco (patron que documenta
+ * el propio tower-http).
+ */
 
 async fn healthz(State(state): State<AppState>) -> Result<impl IntoResponse> {
     let healthy = sqlx::query_scalar::<_, i32>("SELECT 1")
@@ -864,5 +880,26 @@ async fn handle_socket(socket: WebSocket, mut rx: broadcast::Receiver<String>) {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /* El dashboard (Fase 7) se sirve desde disco junto al manifest: un
+     * backend sin su index.html es un arranque roto en vivo. Este test
+     * pinchea el bundle frente a olvidos de commit. */
+    #[test]
+    fn dashboard_index_html_exists_next_to_manifest() {
+        let root = env!("CARGO_MANIFEST_DIR");
+        let index = std::path::Path::new(root)
+            .join("dashboard")
+            .join("index.html");
+        assert!(
+            index.is_file(),
+            "falta {}: el collector sirve el dashboard desde ese path",
+            index.display()
+        );
+        let app_js = std::path::Path::new(root).join("dashboard").join("app.js");
+        assert!(app_js.is_file(), "falta {}", app_js.display());
     }
 }

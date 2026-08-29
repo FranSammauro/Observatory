@@ -27,8 +27,8 @@ Ver [`PHASES.md`](PHASES.md) para el estado del desarrollo por fases, y
 ```
 personal-observability/
 ├── agent/          # Agent en C (ver agent/README.md)
-├── collector/       # Collector en Rust (ver collector/README.md)
-├── dashboard/        # Dashboard (Fase 7+)
+├── collector/
+│   ├── dashboard/    # UI estatica del dashboard (Fase 7, servida por el collector)
 ├── deploy/           # Docker, systemd, config de Alpine
 ├── docs/
 │   └── adr/          # Architecture Decision Records
@@ -49,9 +49,12 @@ token y persistencia en PostgreSQL. Ver [`agent/README.md`](agent/README.md)
 y [`collector/README.md`](collector/README.md). Decisiones de ingestion:
 [`docs/adr/0003-collector-ingestion.md`](docs/adr/0003-collector-ingestion.md).
 
-Falta del camino hacia producción: dashboard (Fase 7), y
-hardening/TLS/benchmark (Fase 8). Ya entregadas: query API + estados de
-conectividad (Fase 4), alert engine (Fase 5) y health checks + eventos
+Ya del dashboard (Fase 7): entregado el **bloque 7.1 Overview + skeleton**
+(login bearer, summary cards, lista de agents y timeline en vivo por WS),
+servido por el propio collector; quedan 7.2 host page y 7.3 alertas e
+historicos. Del camino hacia producción falta hardening/TLS/benchmark
+(Fase 8). Ya entregadas: query API + estados de conectividad (Fase 4),
+alert engine (Fase 5) y health checks + eventos
 realtime + historial unificado + summary (Fase 6).
 
 TLS todavía no está implementado (queda para la Fase 8 de hardening) —

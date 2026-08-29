@@ -4,11 +4,12 @@ Collector central en **Rust (Axum)** que recibe los payloads que emite el
 agent C (`observer-agent`), los valida, los autentica por bearer token, y
 los persiste en PostgreSQL.
 
-> Estado actual: **Fase 6 entregada** — health checks HTTP/TCP (6.1),
-> WebSocket de eventos realtime (6.2) e historial unificado + summary de
-> salud + eventos de conectividad (6.3). Fase 5 entera entregada (alert
-> engine: 5.1, 5.2 y 5.3) y Fases 4, 4.2 y 4.3 tambien. Ver
-> [`../PHASES.md`](../PHASES.md).
+> Estado actual: **Fase 7, bloque 7.1 entregado** — dashboard web
+> estatico (Overview: summary cards + lista de agents + timeline en vivo
+> por WS) servido por el propio collector con login por bearer token.
+> Fases 6 entera (health checks 6.1, WS realtime 6.2, historial unificado
+> + summary + conectividad 6.3) y 5 entera (alert engine: 5.1, 5.2 y 5.3)
+> y Fases 4, 4.2 y 4.3 tambien. Ver [`../PHASES.md`](../PHASES.md).
 
 ## Arquitectura
 
@@ -19,7 +20,33 @@ Agent (C) --POST /api/v1/metrics--> Collector (Rust/Axum) --> PostgreSQL
 
 Dashboard  --GET /api/v1/...--> Collector --> PostgreSQL
                           (Authorization: Bearer <token>)
+        --WS /api/v1/events?token=-->
+
+Browser     --GET / (dashboard)--> Collector (HTML+CSS+JS vanilla)
 ```
+
+## Dashboard (Fase 7)
+
+El collector sirve en su propio listener una UI web estatica de
+**HTML+CSS+JS vanilla** (`collector/dashboard/`): sin framework, sin build
+step y sin dependencias JS. Consume la REST API y el WebSocket de eventos
+de arriba con el mismo bearer token.
+
+- `GET /` — el dashboard (`index.html` + `app.js` + `style.css`), servido
+  por cualquier ruta no capturada por la API (`ServeDir` + SPA fallback a
+  `index.html`); `/api/*` y `/healthz` ganan por precedencia.
+- Login: guarda el token en `sessionStorage` (`obs_token`), lo manda como
+  `Authorization: Bearer` en cada fetch y como `?token=` en el WS; un 401
+  devuelve al login.
+- Vista **Overview** (bloque 7.1): summary cards
+  (`GET /api/v1/health/summary`) de agents online/degraded/offline, checks
+  up/down/unknown y alertas pending/firing; lista de agents con badge de
+  estado y tiempos relativos (`GET /api/v1/agents`); timeline unificado
+  (`GET /api/v1/events/history` limit 50) renderizado por `type`, con
+  append en vivo de los eventos del WS, deduplicacion y refresco debounced
+  del summary.
+- Las vistas **Host** y **Alertas e historicos** son placeholders
+  (bloques 7.2 y 7.3).
 
 Endpoints:
 
@@ -221,6 +248,7 @@ Contrato de payloads: ver [`../agent/src/protocol.c`](../agent/src/protocol.c)
 | `OBS_HEALTH_DEFAULT_TIMEOUT_SECS` | `5` | timeout por defecto de un check (1-300), si el payload no trae `timeout_secs` (bloque 6.1) |
 | `OBS_WS_CHANNEL_CAPACITY` | `256` | capacidad del canal broadcast de eventos WS; suscriptores lentos descartan eventos (bloque 6.2) |
 | `OBS_CONNECTIVITY_POLL_SECS` | `5` | periodo del runner de conectividad (bloque 6.3); >= 1, fail-fast al arrancar |
+| `OBS_DASHBOARD_DIR` | `dashboard` | carpeta relativa (a CWD) con la UI estatica del dashboard (bloque 7.1); no puede quedar vacia |
 | `RUST_LOG` | `info` | nivel de log (tracing) |
 
 ## Build y tests

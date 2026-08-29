@@ -77,6 +77,7 @@ pub struct Config {
     pub health_default_timeout_secs: i64,
     pub ws_channel_capacity: usize,
     pub connectivity_poll_secs: i64,
+    pub dashboard_dir: String,
 }
 
 fn parse_u32(name: &str, default: u32) -> Result<u32, String> {
@@ -138,6 +139,9 @@ impl Config {
             WS_CHANNEL_CAPACITY_DEFAULT as u32,
         )? as usize;
         let connectivity_poll_secs = parse_i64("OBS_CONNECTIVITY_POLL_SECS", 5)?;
+        let dashboard_raw =
+            env::var("OBS_DASHBOARD_DIR").unwrap_or_else(|_| "dashboard".to_string());
+        let dashboard_dir = sanitize_dashboard_dir(&dashboard_raw)?;
 
         validate_state_limits(state_online_secs, state_degraded_secs)?;
         validate_reboot_drop(reboot_min_uptime_drop_secs)?;
@@ -166,6 +170,7 @@ impl Config {
             health_default_timeout_secs,
             ws_channel_capacity,
             connectivity_poll_secs,
+            dashboard_dir,
         })
     }
 
@@ -277,6 +282,20 @@ pub fn validate_connectivity_poll(poll_secs: i64) -> Result<(), String> {
     Ok(())
 }
 
+/*
+ * Directorio del dashboard (Fase 7, bloque 7.1): se sirve tal cual, con
+ * un solo saneamiento — quitar el `/` final para que ServeDir no falle
+ * con un path tipo `dashboard/` duplicado al resolver index.html. No
+ * puede quedar vacio.
+ */
+pub fn sanitize_dashboard_dir(raw: &str) -> Result<String, String> {
+    let dir = raw.trim().trim_end_matches('/').to_string();
+    if dir.is_empty() {
+        return Err("OBS_DASHBOARD_DIR no puede quedar vacio".to_string());
+    }
+    Ok(dir)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -385,5 +404,19 @@ mod tests {
     fn connectivity_poll_rejects_zero_and_negative() {
         assert!(validate_connectivity_poll(0).is_err());
         assert!(validate_connectivity_poll(-1).is_err());
+    }
+
+    #[test]
+    fn dashboard_dir_default_strips_trailing_slash() {
+        assert_eq!(sanitize_dashboard_dir("dashboard").unwrap(), "dashboard");
+        assert_eq!(sanitize_dashboard_dir("dashboard/").unwrap(), "dashboard");
+        assert_eq!(sanitize_dashboard_dir(" /web/ ").unwrap(), "/web");
+    }
+
+    #[test]
+    fn dashboard_dir_rejects_empty() {
+        assert!(sanitize_dashboard_dir("").is_err());
+        assert!(sanitize_dashboard_dir("/").is_err());
+        assert!(sanitize_dashboard_dir("   ").is_err());
     }
 }

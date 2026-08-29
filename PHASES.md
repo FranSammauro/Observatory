@@ -36,7 +36,14 @@ desarrollo con commits progresivos.
       checks, entregado), **6.3** historial unificado + summary de salud +
       eventos de conectividad (entregado). Ver detalle abajo.
 - [ ] **Fase 7 — Dashboard**
-      Overview, host page, alertas, históricos.
+      UI web estatica servida por el propio collector (sin framework ni
+      build step, filosofia del repo). Subdividida en 3 bloques: **7.1**
+      overview + skeleton (entregado): login bearer + layout +
+      navegacion, summary cards, lista de agents y timeline unificado en
+      vivo por WS; **7.2** host page (detalle por agent: estado, series
+      de metricas, reboots, conectividad, alertas del host); **7.3**
+      alertas e historicos (gestion de rules y checks + historiales
+      completos). Ver detalle abajo.
 - [ ] **Fase 8 — Hardening y benchmark experimental**
       TLS, rate limiting, sanitizers/fuzzing, benchmark reproducible en
       Pentium M + Alpine Linux.
@@ -659,3 +666,61 @@ desarrollo con commits progresivos.
   - Negativos: endpoints sin token -> 401; `limit=0` -> 400
     `invalid_limit`; `agent_id=nope` -> 400 `invalid_agent_id`.
   - 140 tests en verde, build/clippy/fmt limpios.
+
+## Fase 7 — detalle
+
+Dashboard web servido por el propio collector: **HTML+CSS+JS vanilla**
+(una pagina + un CSS + un JS), sin framework, sin build step y sin
+dependencias JS — el unico cambio de backend del bloque 7.1 es servir un
+directorio estatico (`tower-http::services::ServeDir` + `fallback_service`
+con SPA fallback a `index.html`). Consume la REST API y el WebSocket ya
+existentes (Fases 4-6) con el mismo bearer token.
+
+**Auth:** pantalla de login que pide el `OBS_COLLECTOR_TOKEN`; se guarda
+en `sessionStorage` (`obs_token`) y se manda como `Authorization: Bearer`
+en cada `fetch`; el WS lo pasa como `?token=`. 401 en cualquier request
+devuelve al login.
+
+**Bloques:**
+
+- **Bloque 7.1 — Overview + skeleton (entregado):**
+  - Backend: `OBS_DASHBOARD_DIR` (default `dashboard`, carpeta relativa al
+    binario) montada con `ServeDir` con fallback SPA a `index.html`;
+    `build_router` agrega `.fallback_service(...)` (las rutas `/api/*` y
+    `/healthz` explicitas siguen ganando). `tower-http` gana la feature
+    `fs`.
+  - `collector/dashboard/index.html` + `app.js` + `style.css`:
+    - Login (token) -> layout con sidebar (Overview / Host / Alertas e
+      historicos — vistas 7.2 y 7.3 placeholder con "proximamente").
+    - Overview: summary cards (`GET /api/v1/health/summary`): agents
+      online/degraded/offline, checks up/down/unknown, alertas
+      pending/firing; lista de agents con badge de estado y tiempos
+      relativos (`GET /api/v1/agents`); timeline unificado
+      (`GET /api/v1/events/history` limit 50) renderizado por `type`, con
+      append en vivo de los eventos del WS (`/api/v1/events?token=`),
+      deduplicacion por orden y refresco (debounced) del summary ante
+      cualquier evento.
+    - Helpers de tiempo relativo y formato de fechas; los eventos
+      `events_lagged` del WS muestran un aviso en la cola del timeline.
+  - Tests: config `OBS_DASHBOARD_DIR`, y un test que verifica que
+    `dashboard/index.html` existe junto al manifest (evita commitear el
+    backend sin el frontend). **143 en total** (3 nuevos).
+  - Validado en vivo: collector sirviendo las 3 hojas + fallback SPA,
+    login con token correcto/incorrecto (401 -> login), cards con datos
+    reales (1 agente, http-root down / pg-port up), timeline en vivo con
+    eventos de `connectivity_event`/`health_result`/`alert_event`
+    agregandose al abrir (a traves del WS estando el overview montado).
+
+- **Bloque 7.2 — Host page (pendiente):**
+  Detalle por agent (ruta `/host.html?agent=...`): estado + `since`,
+  metrica y ultimo valor de cada serie (`GET /api/v1/agents/{id}/metrics`),
+  grafica simple de una serie elegida (`.../metrics/{metric}?limit=...`),
+  timeline de conectividad (`/api/v1/events/history?agent_id=...`),
+  reboots (`/api/v1/agents/{id}/reboots`) y alertas activas del host
+  (`/api/v1/alerts?agent_id=...`).
+
+- **Bloque 7.3 — Alertas e historicos (pendiente):**
+  Vistas completas de gestion y lectura: rules (list/create/delete),
+  checks (list/create/delete/results), alertas activas e historial de
+  alertas, historial unificado completo con filtros, y check results.
+  Formularios con validacion contra los codigos de error de la API.

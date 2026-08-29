@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Observer &middot; Dashboard</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+  <div id="login" class="login hidden">
+    <form id="login-form" class="card login-card">
+      <h1>Observer</h1>
+      <p class="muted">El dashboard usa el mismo token bearer del collector.</p>
+      <label for="token">Token</label>
+      <input id="token" type="password" autocomplete="off" placeholder="OBS_COLLECTOR_TOKEN" required>
+      <button type="submit" class="btn primary">Entrar</button>
+      <p id="login-error" class="error hidden"></p>
+    </form>
+  </div>
+
+  <div id="app" class="app hidden">
+    <aside class="sidebar">
+      <h2 class="brand">Observer</h2>
+      <nav>
+        <a class="nav-item active" data-view="overview" href="#overview">Overview</a>
+        <a class="nav-item" data-view="host" href="#host" title="Bloque 7.2">Host</a>
+        <a class="nav-item" data-view="alerts" href="#alerts" title="Bloque 7.3">Alertas e historicos</a>
+      </nav>
+      <button id="logout" class="btn ghost logout">Salir</button>
+    </aside>
+
+    <main class="content">
+      <section id="view-overview" class="view">
+        <header class="page-head">
+          <h1>Overview</h1>
+          <span id="last-refresh" class="muted"></span>
+        </header>
+
+        <div class="cards">
+          <div class="card summary">
+            <h3>Agents</h3>
+            <div class="counts">
+              <span class="count pill online" id="agents-online">-</span>
+              <span class="count pill degraded" id="agents-degraded">-</span>
+              <span class="count pill offline" id="agents-offline">-</span>
+            </div>
+            <p class="muted total" id="agents-total">-</p>
+          </div>
+          <div class="card summary">
+            <h3>Checks</h3>
+            <div class="counts">
+              <span class="count pill up" id="checks-up">-</span>
+              <span class="count pill down" id="checks-down">-</span>
+              <span class="count pill unknown" id="checks-unknown">-</span>
+            </div>
+            <p class="muted total" id="checks-total">-</p>
+          </div>
+          <div class="card summary">
+            <h3>Alertas</h3>
+            <div class="counts">
+              <span class="count pill pending" id="alerts-pending">-</span>
+              <span class="count pill firing" id="alerts-firing">-</span>
+            </div>
+            <p class="muted total" id="alerts-total">-</p>
+          </div>
+        </div>
+
+        <div class="panels">
+          <div class="card">
+            <h3>Agents</h3>
+            <table class="table">
+              <thead>
+                <tr><th>Id</th><th>Estado</th><th>Last seen</th><th>First seen</th></tr>
+              </thead>
+              <tbody id="agents-body"></tbody>
+            </table>
+            <p class="muted"><button id="reload-agents" class="btn ghost small">Recargar</button></p>
+          </div>
+
+          <div class="card">
+            <h3>Actividad reciente</h3>
+            <ul id="timeline" class="timeline"></ul>
+          </div>
+        </div>
+      </section>
+
+      <section id="view-host" class="view hidden">
+        <h1>Host</h1>
+        <p class="muted">Detalle por agente: llega en el bloque 7.2.</p>
+      </section>
+
+      <section id="view-alerts" class="view hidden">
+        <h1>Alertas e historicos</h1>
+        <p class="muted">Vista de gestion y lectura: llega en el bloque 7.3.</p>
+      </section>
+    </main>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
