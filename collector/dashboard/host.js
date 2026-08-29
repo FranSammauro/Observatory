@@ -247,10 +247,6 @@ function scheduleRefresh() {
   }, 900);
 }
 
-function opText(op) {
-  return { gt: ">", gte: ">=", lt: "<", lte: "<=", eq: "=", ne: "!=" }[op] || op;
-}
-
 function fmtVal(v) {
   if (v === null || v === undefined) return "-";
   if (Number.isInteger(v)) return String(v);
@@ -261,12 +257,6 @@ function fmtRange(ms0, ms1) {
   const a = new Date(ms0).toLocaleTimeString();
   const b = ms1 === ms0 ? a : new Date(ms1).toLocaleTimeString();
   return `${a} - ${b}`;
-}
-
-function esc(s) {
-  return String(s ?? "").replace(/[&<>"']/g, (c) => (
-    { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]
-  ));
 }
 
 if (getToken() && AGENT_ID) {

@@ -4,12 +4,13 @@ Collector central en **Rust (Axum)** que recibe los payloads que emite el
 agent C (`observer-agent`), los valida, los autentica por bearer token, y
 los persiste en PostgreSQL.
 
-> Estado actual: **Fase 7, bloques 7.1 y 7.2 entregados** — dashboard web
-> estatico servido por el propio collector con login bearer: Overview
-> (summary cards, lista de agents, timeline en vivo por WS) y host page
-> (detalle por agent, series con ultimo valor, grafica SVG, timeline del
-> host y reboots). Queda 7.3 (alertas e historicos). Fases 6 entera
-> (health checks 6.1, WS realtime 6.2, historial unificado + summary +
+> Estado actual: **Fase 7 completa** — dashboard web estatico servido por
+> el propio collector con login bearer: Overview (summary cards, lista de
+> agents, timeline en vivo por WS), host page (detalle por agent, series
+> con ultimo valor, grafica SVG, timeline del host y reboots) y alertas e
+> historicos (gestion de rules y checks, alertas activas, historial de
+> alertas e historial unificado con filtros). Fases 6 entera (health
+> checks 6.1, WS realtime 6.2, historial unificado + summary +
 > conectividad 6.3), 5 entera (alert engine: 5.1, 5.2 y 5.3) y Fases 4,
 > 4.2 y 4.3 tambien. Ver [`../PHASES.md`](../PHASES.md).
 
@@ -55,7 +56,14 @@ de arriba con el mismo bearer token.
   timeline del host (`/api/v1/events/history?agent_id=...`) en vivo por
   WS y reboots (`/api/v1/agents/{id}/reboots`). El overview enlaza cada
   agente a su host page.
-- Vista **Alertas e historicos**: placeholder (bloque 7.3).
+- Vista **Alertas e historicos** (bloque 7.3): pestañas dentro del
+  overview — Rules (list/create/delete contra `/api/v1/alerts/rules`),
+  Checks (list/create/delete/results contra `/api/v1/health/checks`),
+  Alertas activas (`/api/v1/alerts` con filtro por estado), Historial de
+  alertas (`/api/v1/alerts/history` con filtros por regla y rango) e
+  Historial unificado (`/api/v1/events/history` con filtro de agent y
+  tipo). Formularios con validacion contra los codigos de error de la
+  API.
 
 Endpoints:
 

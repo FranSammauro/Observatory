@@ -74,6 +74,48 @@ function badge(text, cls) {
   return `<span class="badge ${cls}">${text}</span>`;
 }
 
+function esc(s) {
+  return String(s ?? "").replace(/[&<>"']/g, (c) => (
+    { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]
+  ));
+}
+
+function opText(op) {
+  return { gt: ">", gte: ">=", lt: "<", lte: "<=", eq: "=", ne: "!=" }[op] || op;
+}
+
+function fmtNum(v) {
+  if (v === null || v === undefined) return "-";
+  if (Number.isInteger(v)) return String(v);
+  return Number(v).toFixed(2);
+}
+
+function apiErrorText(code) {
+  const map = {
+    invalid_rule_name: "nombre invalido",
+    invalid_metric_name: "metrica invalida",
+    invalid_entity: "entidad invalida",
+    invalid_op: "operador invalido (ge, gt, le o lt)",
+    invalid_threshold: "umbral invalido",
+    invalid_for_secs: "durante no puede ser negativo",
+    rule_already_exists: "ya existe una regla con ese nombre",
+    unknown_rule: "regla no encontrada",
+    invalid_rule_id: "rule_id invalido",
+    invalid_check: "check invalido",
+    invalid_check_kind: "kind debe ser http o tcp",
+    invalid_check_interval: "intervalo entre 1 y 86400",
+    invalid_check_timeout: "timeout entre 1 y 300",
+    invalid_check_target: "target invalido",
+    check_already_exists: "ya existe un check con ese nombre",
+    unknown_check: "check no encontrado",
+    invalid_check_id: "check_id invalido",
+    invalid_alert_state: "estado debe ser pending o firing",
+    invalid_agent_id: "agent_id no es un UUID valido",
+    invalid_time_range: "desde no puede ser posterior a hasta",
+  };
+  return map[code] || (code ? `error ${code}` : "error");
+}
+
 function describeEvent(ev) {
   switch (ev.type) {
     case "alert_event":

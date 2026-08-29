@@ -35,15 +35,16 @@ desarrollo con commits progresivos.
       eventos realtime (canal + publicación desde alertas y health
       checks, entregado), **6.3** historial unificado + summary de salud +
       eventos de conectividad (entregado). Ver detalle abajo.
-- [ ] **Fase 7 — Dashboard**
+- [x] **Fase 7 — Dashboard**
       UI web estatica servida por el propio collector (sin framework ni
       build step, filosofia del repo). Subdividida en 3 bloques: **7.1**
       overview + skeleton (entregado): login bearer + layout +
       navegacion, summary cards, lista de agents y timeline unificado en
       vivo por WS; **7.2** host page (entregado): detalle por agent con
       estado, ultimo valor de cada serie, grafica SVG de una serie,
-      timeline del host y reboots; **7.3** alertas e historicos (gestion
-      de rules y checks + historiales completos). Ver detalle abajo.
+      timeline del host y reboots; **7.3** alertas e historicos
+      (entregado): gestion de rules y checks, alertas activas, historial
+      de alertas y historial unificado con filtros. Ver detalle abajo.
 - [ ] **Fase 8 — Hardening y benchmark experimental**
       TLS, rate limiting, sanitizers/fuzzing, benchmark reproducible en
       Pentium M + Alpine Linux.
@@ -733,8 +734,27 @@ devuelve al login.
   Test de existencias del bundle ampliado a `host.html`+`common.js`.
   Siguen **143 tests**.
 
-- **Bloque 7.3 — Alertas e historicos (pendiente):**
-  Vistas completas de gestion y lectura: rules (list/create/delete),
-  checks (list/create/delete/results), alertas activas e historial de
-  alertas, historial unificado completo con filtros, y check results.
-  Formularios con validacion contra los codigos de error de la API.
+- **Bloque 7.3 — Alertas e historicos (entregado):**
+  La vista `#view-alerts` del overview pasa a ser un conjunto de 5 pestañas
+  (nav `.tabs` / `.atab` dentro de `app.js`, sin paginas nuevas):
+  - **Rules**: tabla de `GET /api/v1/alerts/rules` con borrado por id
+    (`DELETE .../rules/{id}`) y formulario de alta (`POST`) con validacion
+    client-side contra los codigos de error de la API
+    (`rule_already_exists`, `invalid_op`, `invalid_threshold`, ...).
+  - **Checks**: tabla de `GET /api/v1/health/checks` (estado actual,
+    ultimo resultado), borrado (`DELETE .../checks/{id}`), alta (`POST`
+    con validacion de kind/target/intervalo/timeout) y resultados por
+    check (`GET .../checks/{id}/results?limit=30`) desplegados en linea.
+  - **Alertas activas**: `GET /api/v1/alerts` con filtro por estado
+    (pending/firing) y link al host page de cada agente.
+  - **Historial alertas**: `GET /api/v1/alerts/history` con filtros por
+    regla (dropdown poblado desde rules), `from`/`to` (unix secs) y
+    `limit`; transiciones `inactive/pending/firing/resolved` con badges.
+  - **Historial unificado**: `GET /api/v1/events/history` con filtro por
+    `agent_id`, `limit` y recorte por `type` sobre el shape del WS
+    (reusa `describeEvent`).
+  Refactor: `esc`, `opText`, `fmtNum` y `apiErrorText` (mapa de codigos de
+  error de la API a mensajes) pasan a `common.js`; se quitan los duplicados
+  de `host.js`. Test de existencias del bundle cubre las hojas sin cambios
+  (sigue **143 tests**). Validado: 143 tests verdes + clippy limpio + JS
+  3 paginas pasan `node --check`.

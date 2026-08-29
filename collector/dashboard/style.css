@@ -288,3 +288,73 @@ body {
 }
 
 .chart-stats { margin: 8px 0 0; }
+
+.tabs {
+  display: flex;
+  gap: 6px;
+  margin: 16px 0;
+  flex-wrap: wrap;
+}
+
+.tab {
+  border: 1px solid var(--border);
+  background: var(--panel);
+  color: var(--muted);
+  padding: 8px 14px;
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.tab:hover { color: var(--text); }
+.tab.active { color: var(--accent); border-color: var(--accent); background: var(--panel-2); }
+
+.atab .cards { align-items: start; }
+
+.form {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.form label { color: var(--muted); font-size: 12px; }
+.form input, .form select {
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel-2);
+  color: var(--text);
+  margin-bottom: 6px;
+}
+
+.form .btn { margin-top: 8px; justify-self: start; }
+
+.form .error, .form .ok { margin: 4px 0 0; font-size: 13px; }
+.form .ok { color: var(--online); }
+
+.filters {
+  display: flex;
+  gap: 12px;
+  align-items: flex-end;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+
+.filters label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.filters input, .filters select {
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel-2);
+  color: var(--text);
+}
+
+.results { margin-top: 16px; }
+.results h4 { margin: 0 0 8px; color: var(--muted); }

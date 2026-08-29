@@ -91,8 +91,162 @@
       </section>
 
       <section id="view-alerts" class="view hidden">
-        <h1>Alertas e historicos</h1>
-        <p class="muted">Vista de gestion y lectura: llega en el bloque 7.3.</p>
+        <header class="page-head">
+          <h1>Alertas e historicos</h1>
+        </header>
+
+        <nav class="tabs">
+          <button class="tab active" data-atab="rules">Rules</button>
+          <button class="tab" data-atab="checks">Checks</button>
+          <button class="tab" data-atab="active">Alertas activas</button>
+          <button class="tab" data-atab="ahistory">Historial alertas</button>
+          <button class="tab" data-atab="timeline">Historial unificado</button>
+        </nav>
+
+        <section id="atab-rules" class="atab">
+          <div class="cards">
+            <div class="card">
+              <h3>Reglas existentes</h3>
+              <table class="table">
+                <thead><tr><th>Id</th><th>Nombre</th><th>Metrica</th><th>Entidad</th><th>Condicion</th><th>Durante</th><th>Estado</th><th></th></tr></thead>
+                <tbody id="rules-body"><tr><td colspan="8" class="muted">cargando...</td></tr></tbody>
+              </table>
+            </div>
+            <div class="card">
+              <h3>Nueva regla</h3>
+              <form id="rule-form" class="form">
+                <label>Nombre</label>
+                <input id="rule-name" required>
+                <label>Metrica</label>
+                <input id="rule-metric" required placeholder="cpu.usage">
+                <label>Entidad (opcional)</label>
+                <input id="rule-entity" placeholder="cpu0 / null">
+                <label>Condicion</label>
+                <select id="rule-op">
+                  <option value="gt">&gt;</option>
+                  <option value="ge">&ge;</option>
+                  <option value="lt">&lt;</option>
+                  <option value="le">&le;</option>
+                </select>
+                <label>Umbral</label>
+                <input id="rule-threshold" type="number" step="any" required>
+                <label>Durante (segundos, 0 = al instante)</label>
+                <input id="rule-for" type="number" min="0" step="1" value="0">
+                <p id="rule-msg" class="error hidden"></p>
+                <button type="submit" class="btn primary">Crear regla</button>
+              </form>
+            </div>
+          </div>
+        </section>
+
+        <section id="atab-checks" class="atab hidden">
+          <div class="cards">
+            <div class="card">
+              <h3>Checks existentes</h3>
+              <table class="table">
+                <thead><tr><th>Id</th><th>Nombre</th><th>Kind</th><th>Target</th><th>Intervalo</th><th>Estado</th><th>Ultimo</th><th>Resultados</th><th></th></tr></thead>
+                <tbody id="checks-body"><tr><td colspan="9" class="muted">cargando...</td></tr></tbody>
+              </table>
+              <div id="check-results" class="results hidden">
+                <h4 id="check-results-title">Resultados</h4>
+                <table class="table">
+                  <thead><tr><th>Cuando</th><th>Resultado</th><th>Latencia</th><th>Detalle</th></tr></thead>
+                  <tbody id="check-results-body"></tbody>
+                </table>
+              </div>
+            </div>
+            <div class="card">
+              <h3>Nuevo check</h3>
+              <form id="check-form" class="form">
+                <label>Nombre</label>
+                <input id="check-name" required>
+                <label>Kind</label>
+                <select id="check-kind">
+                  <option value="http">http</option>
+                  <option value="tcp">tcp</option>
+                </select>
+                <label>Target</label>
+                <input id="check-target" required placeholder="http://example.com o host:port">
+                <label>Intervalo (segundos)</label>
+                <input id="check-interval" type="number" min="1" max="86400" step="1" required>
+                <label>Timeout (segundos, opcional)</label>
+                <input id="check-timeout" type="number" min="1" max="300" step="1">
+                <p id="check-msg" class="error hidden"></p>
+                <button type="submit" class="btn primary">Crear check</button>
+              </form>
+            </div>
+          </div>
+        </section>
+
+        <section id="atab-active" class="atab hidden">
+          <div class="card">
+            <h3>Alertas activas (pending / firing)</h3>
+            <div class="filters">
+              <label>Estado
+                <select id="active-state">
+                  <option value="">todos</option>
+                  <option value="pending">pending</option>
+                  <option value="firing">firing</option>
+                </select>
+              </label>
+              <button id="reload-active" class="btn ghost small">Recargar</button>
+            </div>
+            <table class="table">
+              <thead><tr><th>Regla</th><th>Metrica</th><th>Condicion</th><th>Agente</th><th>Estado</th><th>Desde</th></tr></thead>
+              <tbody id="active-body"><tr><td colspan="6" class="muted">cargando...</td></tr></tbody>
+            </table>
+          </div>
+        </section>
+
+        <section id="atab-ahistory" class="atab hidden">
+          <div class="card">
+            <h3>Historial de alertas</h3>
+            <div class="filters">
+              <label>Regla
+                <select id="ah-rule"><option value="">todas</option></select>
+              </label>
+              <label>Desde (unix secs)
+                <input id="ah-from" type="number" placeholder="opcional">
+              </label>
+              <label>Hasta (unix secs)
+                <input id="ah-to" type="number" placeholder="opcional">
+              </label>
+              <label>Limite
+                <input id="ah-limit" type="number" min="1" max="1000" value="100">
+              </label>
+              <button id="reload-ahistory" class="btn ghost small">Filtrar</button>
+            </div>
+            <table class="table">
+              <thead><tr><th>Cuando</th><th>Regla</th><th>Agente</th><th>Transicion</th></tr></thead>
+              <tbody id="ahistory-body"><tr><td colspan="4" class="muted">cargando...</td></tr></tbody>
+            </table>
+          </div>
+        </section>
+
+        <section id="atab-timeline" class="atab hidden">
+          <div class="card">
+            <h3>Historial unificado de eventos</h3>
+            <div class="filters">
+              <label>Agente
+                <input id="tl-agent" placeholder="uuid (opcional)">
+              </label>
+              <label>Tipo
+                <select id="tl-type">
+                  <option value="">todos</option>
+                  <option value="alert_event">alert_event</option>
+                  <option value="health_result">health_result</option>
+                  <option value="reboot_event">reboot_event</option>
+                  <option value="connectivity_event">connectivity_event</option>
+                </select>
+              </label>
+              <label>Limite
+                <input id="tl-limit" type="number" min="1" max="1000" value="100">
+              </label>
+              <button id="reload-timeline" class="btn ghost small">Filtrar</button>
+            </div>
+            <ul id="tl-list" class="timeline"></ul>
+          </div>
+        </section>
       </section>
     </main>
   </div>

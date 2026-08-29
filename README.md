@@ -49,14 +49,15 @@ token y persistencia en PostgreSQL. Ver [`agent/README.md`](agent/README.md)
 y [`collector/README.md`](collector/README.md). Decisiones de ingestion:
 [`docs/adr/0003-collector-ingestion.md`](docs/adr/0003-collector-ingestion.md).
 
-Ya del dashboard (Fase 7): entregados los bloques **7.1 Overview +
-skeleton** (login bearer, summary cards, lista de agents y timeline en
-vivo por WS) y **7.2 host page** (detalle por agent, series con grafica
-SVG, timeline del host y reboots), servidos por el propio collector;
-queda 7.3 alertas e historicos. Del camino hacia producción falta
-hardening/TLS/benchmark (Fase 8). Ya entregadas: query API + estados de
-conectividad (Fase 4), alert engine (Fase 5) y health checks + eventos
-realtime + historial unificado + summary (Fase 6).
+Ya del dashboard (Fase 7), entregado completo: **7.1 overview skeleton**
+(login bearer, summary cards, lista de agents y timeline en vivo por WS),
+**7.2 host page** (detalle por agent, series con grafica SVG, timeline
+del host y reboots) y **7.3 alertas e historicos** (gestion de rules y
+checks, alertas activas, historial de alertas e historial unificado con
+filtros), servidos por el propio collector. Del camino hacia producción
+falta hardening/TLS/benchmark (Fase 8). Ya entregadas: query API +
+estados de conectividad (Fase 4), alert engine (Fase 5) y health checks
++ eventos realtime + historial unificado + summary (Fase 6).
 
 TLS todavía no está implementado (queda para la Fase 8 de hardening) —
 ver [`docs/adr/0002-transport-protocol.md`](docs/adr/0002-transport-protocol.md).
