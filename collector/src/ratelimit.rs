@@ -1,5 +1,5 @@
 /*
- * Rate limiting por cliente (Fase 8, bloque 8.1): un token bucket por IP
+ * Rate limiting por cliente: un token bucket por IP
  * para aplanar picos de ingestion y frenar agentes descontrolados o
  * clientes maliciosos que inundan los endpoints de escritura.
  *

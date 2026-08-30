@@ -13,7 +13,7 @@ use crate::error::ApiError;
 use crate::events::EventBus;
 
 /*
- * Health checks proactivos (Fase 6, bloque 6.1): el collector ejecuta
+ * Health checks proactivos: el collector ejecuta
  * probes HTTP/TCP periodicos contra targets externos, registra cada
  * corrida y mantiene el estado up/down actual de cada check.
  *
@@ -25,7 +25,7 @@ use crate::events::EventBus;
  * HTTP: pedido GET minimal sobre TcpStream (mismo espiritu que
  * transport.c del agent: sin libcurl ni crates de HTTP), ok si el codigo
  * de estado es 2xx/3xx. TCP: conexion exitosa => ok. `https://` se
- * rechaza: TLS se difiere a la Fase 8 (ver ADR-0002).
+ * rechaza (ver docs/adr/0002-transport-protocol.md).
  */
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -66,7 +66,7 @@ pub struct ParsedTarget {
  * Parseo manual de target, sin crate de URLs. Reglas:
  *   http://host[:port][/path]
  *   host:port
- * - `https://` se rechaza explicitamente (TLS en Fase 8).
+ * - `https://` se rechaza; ver ADR-0002.
  * - host no vacio, puerto u16 valido.
  */
 pub fn parse_target(kind: CheckKind, target: &str) -> Result<ParsedTarget, String> {
@@ -97,7 +97,7 @@ pub fn parse_target(kind: CheckKind, target: &str) -> Result<ParsedTarget, Strin
             let rest = t
                 .strip_prefix("http://")
                 .ok_or_else(|| {
-                    "target http debe empezar con http:// (https llega en la Fase 8: TLS)"
+                    "target http debe empezar con http:// (https no soportado en health checks; ver ADR-0002)"
                         .to_string()
                 })?
                 .trim_end();
@@ -409,7 +409,7 @@ async fn run_cycle(pool: &PgPool, bus: &EventBus) -> Result<(), sqlx::Error> {
         let update = next_state(prev.as_ref(), outcome.ok, now);
         db::apply_check_outcome(pool, check.id, &outcome, &update).await?;
 
-        /* Evento realtime (bloque 6.2): se publica solo cuando la corrida
+        /* El evento se publica al bus solo cuando la corrida
          * ya quedo commiteada (resultado + estado), con la transicion
          * up/down del ciclo para que el dashboard la pinte al instante. */
         bus.publish(&crate::events::Event::health(
@@ -502,7 +502,7 @@ mod tests {
     #[test]
     fn http_target_rejects_https_and_missing_scheme() {
         let e = parse_target(CheckKind::Http, "https://example.com").unwrap_err();
-        assert!(e.contains("Fase 8"));
+        assert!(e.contains("ADR-0002"));
         assert!(parse_target(CheckKind::Http, "example.com").is_err());
         assert!(parse_target(CheckKind::Http, "").is_err());
     }

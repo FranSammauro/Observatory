@@ -11,7 +11,7 @@
 /* Filesystems "reales" que nos interesa reportar. Todo lo que no este
  * en esta lista se asume pseudo/virtual (proc, sysfs, tmpfs, devtmpfs,
  * cgroup, cgroup2, overlay, squashfs de snaps, etc.) y se descarta -
- * ver informe seccion 35 (cardinalidad). */
+ * ver filesystem.h. */
 static const char *REAL_FS_TYPES[] = {
     "ext2", "ext3", "ext4", "xfs", "btrfs", "vfat", "exfat",
     "ntfs", "ntfs3", "zfs", "f2fs", "jfs", "reiserfs", "hfsplus",

@@ -3,7 +3,7 @@ use axum::http::{header, HeaderMap};
 use crate::error::ApiError;
 
 /*
- * Autenticacion por bearer token (informe seccion 22; ADR-0003).
+ * Autenticacion por bearer token compartido. La comparacion es
  *
  * V1: un unico token compartido, configurado en el Collector via env
  * `OBS_COLLECTOR_TOKEN`, que cada agent envia en `Authorization: Bearer

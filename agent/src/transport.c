@@ -232,12 +232,11 @@ obs_status_t transport_post(const transport_config_t *config,
     }
 
     if (is_https) {
-        /* Ver docs/adr/0002-transport-protocol.md: TLS llega en Fase 8.
-         * Rechazamos explicitamente en vez de degradar silenciosamente
-         * a texto plano bajo una URL que dice https://. */
+        /* El agente no implementa TLS. Ver docs/adr/0002-transport-protocol.md.
+         * Se rechaza explicitamente en lugar de degradar silenciosamente. */
         LOG_ERROR_(COMPONENT,
-            "collector_url uses https:// but TLS is not implemented yet (Fase 8) - "
-            "use http:// for now");
+            "collector_url usa https:// pero el agente no implementa TLS. "
+            "Usar http:// dentro de la red de confianza.");
         return OBS_ERR_UNAVAILABLE;
     }
 

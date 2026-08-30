@@ -83,7 +83,7 @@ obs_status_t memory_parse_meminfo(const char *content, memory_metrics_t *out)
 
     /* Kernels muy viejos (o namespaces raros) pueden no exponer
      * MemAvailable. En ese caso, MemFree es una aproximacion peor pero
-     * evita que el collector falle por completo (informe seccion 10). */
+     * evita que el collector falle por completo. */
     if (!has_available) {
         if (!has_free) {
             return OBS_ERR_PARSE;

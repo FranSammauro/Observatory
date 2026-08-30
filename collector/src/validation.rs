@@ -9,7 +9,7 @@ use crate::error::ApiError;
  * host). El Collector acepta un rango acotado alrededor del "ahora" del
  * servidor: tolera skew hacia el futuro (reloj del host adelantado) y
  * rechaza datos viejos mas alla de una ventana de retraso razonable
- * (el agent no spool en disco en V1 - seccion 27 del informe - asi que
+ * (el agente no persiste samples en disco; si el timestamp esta fuera
  * un dato muy viejo es ruido o un reloj descompuesto, no un backlog
  * legitimo).
  */

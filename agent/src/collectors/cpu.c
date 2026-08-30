@@ -108,8 +108,7 @@ obs_status_t cpu_collect(cpu_collector_t *collector, cpu_metrics_t *out)
 
     /* Contadores de counter reset (reboot, overflow, kernel raro):
      * si el delta seria negativo, descartamos esta muestra en vez de
-     * reportar un valor invalido (ver informe seccion 76, Definition of
-     * Done: "Handles counter reset"). */
+     * reportar un valor invalido. */
     if (total_curr < total_prev || idle_curr < idle_prev) {
         LOG_WARN_(COMPONENT, "counter reset detected, discarding sample");
         collector->previous = current;

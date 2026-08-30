@@ -1,51 +1,46 @@
-# ADR-0001: Lenguaje del agent
+# ADR-0001: Lenguaje del agente
 
 ## Estado
 
-Aceptado
+Aceptado.
 
 ## Contexto
 
 El agente debe ejecutarse en hosts Linux con recursos potencialmente muy
-limitados (hardware de referencia experimental: Pentium M, 256 MB RAM,
-Alpine Linux), interactuar directamente con interfaces del sistema
-(`/proc`, `/sys`, `statvfs()`, sockets), y mantener un footprint de
-memoria y binario mínimo.
+limitados. El hardware de referencia experimental es un Pentium M con
+256 MB de RAM corriendo Alpine Linux. El agente necesita:
+
+- interactuar directamente con interfaces del kernel (`/proc`, `/sys`,
+  `statvfs()`, sockets POSIX);
+- mantener un footprint de memoria y binario minimo;
+- funcionar sin privilegios de root para las metricas basicas;
+- compilar con un toolchain estandar sin dependencias de sistema.
 
 ## Alternativas consideradas
 
-- **Rust**: buena seguridad de memoria y ergonomía, pero el runtime y el
-  tamaño de binario típico (aún con `opt-level=z` y sin panics) son mayores
-  que en C, y el objetivo explícito de este componente es explorar
-  interacción directa y minimalista con el kernel de Linux.
-- **Go**: runtime con garbage collector y goroutines, footprint de memoria
-  base más alto de lo deseable para el hardware de referencia; menos
-  control fino sobre allocations.
-- **C**: acceso directo a APIs POSIX/Linux sin capas intermedias, sin
-  runtime, binario pequeño, control total sobre memoria.
+**Rust**: garantias de memory safety en tiempo de compilacion y ergonomia
+alta, pero el runtime y el tamano de binario tipico son mayores que en C,
+incluso con perfiles agresivos de optimizacion.
 
-## Decisión
+**Go**: runtime con garbage collector, footprint de memoria base
+significativo. El objetivo de menos de 5 MB de RSS en reposo lo
+descarta para el hardware de referencia.
 
-Usar C (estándar C11) para el agent.
+**C**: sin runtime, sin garbage collector, acceso directo a POSIX/Linux
+sin capas intermedias, binario pequeno. El costo es la responsabilidad
+manual de la gestion de memoria, mitigado con politicas explicitas
+(buffers de tamano fijo, limites en `agent.h`, compilacion con
+`-Wall -Wextra -Wpedantic -Wconversion -Wshadow` y builds de
+AddressSanitizer/UndefinedBehaviorSanitizer como parte del flujo de
+desarrollo normal).
+
+## Decision
+
+C11 para el agente.
 
 ## Consecuencias
 
-**Positivas**
-
-- Overhead de runtime mínimo.
-- Acceso directo a `/proc`, `/sys`, `statvfs()` sin bindings intermedios.
-- Binario pequeño, apto para el hardware de referencia.
-
-**Negativas**
-
-- Carga manual de la responsabilidad de memory safety (sin borrow checker
-  ni GC): mitigado con límites de tamaño explícitos en todos los buffers
-  (`OBS_MAX_*` en `agent.h`), `-Wall -Wextra -Wpedantic -Wconversion
-  -Wshadow`, y build con AddressSanitizer/UndefinedBehaviorSanitizer
-  (`make sanitize`) como parte del flujo de desarrollo.
-- Más código boilerplate para cosas que en otros lenguajes serían triviales
-  (parsing, formateo de strings) — aceptable dado el alcance acotado del
-  agent (collect → serialize → send).
-
-El Collector, en cambio, usa Rust — ver el informe técnico completo para la
-justificación de esa separación de responsabilidades por lenguaje.
+El collector, que resuelve un problema diferente (concurrencia, networking,
+persistencia, evaluacion de reglas), usa Rust. La separacion es
+intencional: cada componente usa el lenguaje mas adecuado para su problema,
+no el mismo lenguaje por conveniencia.

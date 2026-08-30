@@ -24,21 +24,10 @@
 #define COMPONENT "main"
 
 /*
- * Fase 2: agrega transporte HTTP real (transport.c), heartbeat como
- * canal independiente de las metricas (informe seccion 24), retry con
- * backoff+jitter ante fallos de envio (seccion 26), y el resto de
- * collectors (disk, network, filesystem, uptime, process, temperature).
- *
- * Scheduling: se usa CLOCK_MONOTONIC (nunca wall clock, ver informe
- * seccion 57) para decidir cuando toca la proxima muestra de metricas
- * y el proximo heartbeat, de forma independiente entre si.
- *
- * Estrategia de retry (seccion 27, "sin buffer local" para V1): si un
- * envio falla, NO se bloquea el loop reintentando la misma muestra -
- * se aplica backoff antes del proximo intento, y en ese proximo intento
- * se envia una muestra fresca (el dato viejo ya no es tan relevante).
- * Esto evita que el agent se cuelgue reintentando indefinidamente una
- * unica muestra mientras el resto del sistema sigue funcionando.
+ * Loop principal del agente. Dos canales independientes programados
+ * con CLOCK_MONOTONIC: metricas y heartbeat. Ante un fallo de envio,
+ * se aplica backoff exponencial sin bloquear el otro canal. No se
+ * almacena la muestra fallida; el siguiente ciclo envia datos frescos.
  */
 
 typedef struct {

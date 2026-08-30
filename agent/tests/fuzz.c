@@ -1,5 +1,5 @@
 /*
- * Harness de fuzzing minimo (Fase 8, bloque 8.3).
+ * Harness de fuzzing deterministico del agente.
  *
  * Sin libFuzzer (clang) ni dependencias externas: un generador
  * deterministico xorshift64 arma el corpus (entradas interesantes

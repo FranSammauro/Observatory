@@ -4,9 +4,10 @@
 #include "agent.h"
 
 /*
- * Conteo agregado de procesos (informe seccion 14). Deliberadamente NO
- * se reporta una serie por PID (cardinalidad no acotada, ver seccion
- * 35) - solo conteos agregados por estado.
+ * Conteo agregado de procesos por estado desde /proc/<pid>/stat. Se
+ * reportan conteos totales por categoria (running, sleeping, stopped,
+ * zombie) en lugar de metricas por PID para evitar cardinalidad no
+ * acotada.
  */
 
 typedef struct {
@@ -19,8 +20,7 @@ typedef struct {
 
 obs_status_t process_collect(process_metrics_t *out);
 
-/* Mapea el caracter de estado de /proc/<pid>/stat (R, S, D, T, Z, ...)
- * a una de las categorias agregadas. Expuesto para tests. */
+/* Expuesto para tests: normaliza el caracter de estado de /proc/<pid>/stat. */
 char process_normalize_state(char raw_state);
 
 #endif /* OBSERVER_COLLECTOR_PROCESS_H */

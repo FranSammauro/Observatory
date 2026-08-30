@@ -4,13 +4,11 @@
 #include "agent.h"
 
 /*
- * Trafico de red por interfaz (informe seccion 13), via /proc/net/dev.
- * Igual que CPU y disk, se reporta como *rate* calculada por delta
- * entre snapshots, usando el tiempo real transcurrido (reloj
- * monotonico) para el divisor.
- *
- * No se reportan interfaces loopback (lo) ni interfaces down, para
- * mantener la cardinalidad razonable.
+ * Collector de trafico de red por interfaz desde /proc/net/dev.
+ * Las tasas (bytes/s, paquetes/s) se calculan por delta entre dos
+ * lecturas dividido por el tiempo real transcurrido. La interfaz
+ * loopback (lo) se descarta; las interfaces sin trafico no se
+ * excluyen para permitir detectar su inactividad.
  */
 
 typedef struct {
@@ -53,8 +51,7 @@ void network_collector_init(network_collector_t *collector);
 obs_status_t network_collect(network_collector_t *collector, double elapsed_secs,
                               network_metrics_t *out);
 
-/* Parsea una linea de /proc/net/dev ("iface: rx... tx..."). Expuesto
- * para tests. */
+/* Expuesto para tests: parsea una linea de /proc/net/dev. */
 obs_status_t network_parse_line(const char *line, network_snapshot_entry_t *out);
 
 #endif /* OBSERVER_COLLECTOR_NETWORK_H */

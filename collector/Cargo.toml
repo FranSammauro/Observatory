@@ -1,6 +1,6 @@
 [package]
 name = "observer-collector"
-version = "0.3.0"
+version = "1.0.0"
 edition = "2021"
 description = "Collector central en Rust: ingestion de metricas de los agents, autenticacion bearer, persistencia en PostgreSQL"
 license = "MIT"

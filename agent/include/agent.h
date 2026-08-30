@@ -5,19 +5,16 @@
 #include <stddef.h>
 #include <stdbool.h>
 
-/* Protocol / build versioning */
-#define AGENT_VERSION      "0.2.0-phase2"
+#define AGENT_VERSION      "1.0.0"
 #define PROTOCOL_VERSION   1
 
-/* Sizing limits (see docs/adr/0001-agent-language.md — budget-driven design) */
 #define OBS_MAX_LINE           512
-#define OBS_MAX_PATH            256
-#define OBS_MAX_HOSTNAME         256
-#define OBS_MAX_JSON_BUFFER     16384
-#define OBS_MAX_INTERFACES        16
-#define OBS_MAX_FILESYSTEMS       16
+#define OBS_MAX_PATH           256
+#define OBS_MAX_HOSTNAME       256
+#define OBS_MAX_JSON_BUFFER    16384
+#define OBS_MAX_INTERFACES     16
+#define OBS_MAX_FILESYSTEMS    16
 
-/* Error classification (see informe §56) */
 typedef enum {
     OBS_OK = 0,
     OBS_ERR_IO,

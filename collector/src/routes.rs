@@ -52,10 +52,9 @@ pub fn build_router(state: AppState) -> Router {
     Router::new()
         .route("/api/v1/agents/heartbeat", post(heartbeat_handler))
         .route("/api/v1/metrics", post(metrics_handler))
-        /* Rate limiting (Fase 8, bloque 8.1): solo sobre los endpoints de
-         * ingestion (los que los agents golpean repetido). route_layer
-         * afecta solo a las rutas registradas hasta este punto; /healthz
-         * se registra despues y queda exento. */
+        /* Rate limiting aplicado solo sobre los endpoints de ingestion. route_layer
+         * afecta unicamente las rutas registradas hasta este punto; /healthz
+         * y la query API quedan exentos. */
         .route_layer(middleware::from_fn_with_state(
             limiter,
             rate_limit_middleware,
@@ -104,10 +103,9 @@ pub fn build_router(state: AppState) -> Router {
 }
 
 /*
- * Rate limiting por IP (Fase 8, bloque 8.1). Clave = IP de origen del
- * socket; cuando no hay ConnectInfo (tests unitarios / handshakes
- * raros) se cae a una clave compartida y el limiter de policy deshabilitada
- * simplemente deja pasar.
+ * Rate limiting por IP. La clave es la IP de origen del socket. Cuando no
+ * hay ConnectInfo disponible (tests o handshakes inusuales), el limiter con
+ * policy deshabilitada deja pasar la request.
  */
 async fn rate_limit_middleware(
     State(limiter): State<Arc<RateLimiter>>,
@@ -144,13 +142,9 @@ fn too_many_requests(policy: RatePolicy) -> Response {
 }
 
 /*
- * Dashboard (Fase 7, bloque 7.1): la UI estatica (HTML/CSS/JS vanilla)
- * vive en `OBS_DASHBOARD_DIR` (default `dashboard/`, relativo a CWD) y se
- * sirve por cualquier ruta no capturada por la API. Sirve `index.html`
- * como SPA fallback para gaps de ruta del navegador; las rutas explicitas
- * (la API y `/healthz`) siempre ganan por precedencia. `index.html` al
- * servir un path de la SPA que no existe en disco (patron que documenta
- * el propio tower-http).
+ * El dashboard (HTML/CSS/JS estatico) se sirve desde OBS_DASHBOARD_DIR.
+ * Las rutas de la API y /healthz tienen prioridad; cualquier otra ruta
+ * cae al ServeDir con index.html como SPA fallback.
  */
 
 async fn healthz(State(state): State<AppState>) -> Result<impl IntoResponse> {
@@ -246,10 +240,7 @@ async fn metrics_handler(
     })))
 }
 
-/*
- * Query API (Fase 4, bloque 1). Endpoints GET de solo lectura, tambien
- * tras el bearer token compartido (lee datos de la misma plataforma).
- */
+/* Endpoints GET de solo lectura. Mismo bearer token que la ingestion. */
 
 async fn agents_list_handler(
     State(state): State<AppState>,
@@ -316,9 +307,8 @@ async fn agent_reboots_handler(
 }
 
 /*
- * Serializa un agente con su estado de conectividad derivado (bloque 4.2).
- * El estado es funcion pura de la antiguedad de `last_seen`, calculado al
- * leer, no persistido.
+ * Serializa un agente con su estado de conectividad derivado. El estado es
+ * funcion pura de la antiguedad de last_seen; no se persiste.
  */
 fn agent_json(agent: &db::AgentRow, now: DateTime<Utc>, limits: &StateLimits) -> serde_json::Value {
     let age_secs = now.signed_duration_since(agent.last_seen).num_seconds();
@@ -395,11 +385,8 @@ fn parse_agent_uuid(raw: &str) -> Result<uuid::Uuid> {
         .map_err(|_| ApiError::bad_request("invalid_agent_id", "agent_id no es un UUID valido"))
 }
 
-/*
- * Alert engine (Fase 5, bloque 5.1): gestion de reglas declarativas.
- * El evaluador periodico las lee via db::list_enabled_rules; aca solo se
- * crean, listan y borran con el mismo bearer token que el resto.
- */
+/* Gestion de reglas de alerta. El evaluador periodico las lee via
+ * db::list_enabled_rules; estos endpoints solo crean, listan y borran. */
 
 async fn create_rule_handler(
     State(state): State<AppState>,
@@ -485,16 +472,11 @@ async fn alert_history_handler(
 }
 
 /*
- * Historial unificado + summary de salud (Fase 6, bloque 6.3).
+ * GET /api/v1/events/history: timeline unificado que cruza alertas, health
+ * checks, reboots y eventos de conectividad en orden cronologico descendente.
  *
- * `GET /api/v1/events/history` es el timeline del dashboard: cruza las
- * cuatro fuentes de eventos (alertas, health checks, reboots y
- * conectividad), en orden cronologico desc y acotado por `limit`. Los
- * eventos respetan el mismo shape que el WebSocket (type/ts, etc.)
- *
- * `GET /api/v1/health/summary` agrega el estado de la plataforma en un
- * solo GET: conectividad derivada de los agentes (bloque 4.2), estado
- * actual de los checks (bloque 6.1) y alertas pending/firing (bloque 5).
+ * GET /api/v1/health/summary: estado agregado de la plataforma en un solo
+ * GET: conectividad de agentes, estado de checks y conteo de alertas.
  */
 
 fn timeline_entry(
@@ -648,10 +630,8 @@ fn alert_state_count(rows: &[db::AlertStateCount], target: &str) -> i64 {
         .unwrap_or(0)
 }
 
-/*
- * Health checks (Fase 6, bloque 6.1): creacion, listado con estado,
- * borrado e historial de corridas. Mismo bearer token que el resto.
- */
+/* Gestion de health checks: creacion, listado con estado actual,
+ * borrado e historial de resultados. Mismo bearer token que el resto. */
 
 async fn create_check_handler(
     State(state): State<AppState>,
@@ -734,10 +714,8 @@ async fn check_results_handler(
     ))
 }
 
-/*
- * "name" tiene UNIQUE en la DB: un duplicado es un 400 explicito, no un
- * 500. Cualquier otro error sqlx se propaga como internal_error.
- */
+/* El campo name tiene UNIQUE en la DB. Un duplicado devuelve 400 en lugar
+ * de 500. El resto de errores sqlx se propagan como internal_error. */
 fn check_create_err(e: sqlx::Error) -> ApiError {
     if let sqlx::Error::Database(db) = &e {
         if db.is_unique_violation() {
@@ -816,10 +794,8 @@ fn rule_json(row: &db::AlertRuleRow) -> serde_json::Value {
     })
 }
 
-/*
- * "name" tiene UNIQUE en la DB: un duplicado es un 400 explícito, no un
- * 500. Cualquier otro error sqlx se propaga como internal_error.
- */
+/* El campo name tiene UNIQUE en la DB. Un duplicado devuelve 400 en lugar
+ * de 500. El resto de errores sqlx se propagan como internal_error. */
 fn rule_create_err(e: sqlx::Error) -> ApiError {
     if let sqlx::Error::Database(db) = &e {
         if db.is_unique_violation() {
@@ -847,17 +823,11 @@ fn now_epoch_secs() -> i64 {
 }
 
 /*
- * WebSocket de eventos realtime (Fase 6, bloque 6.2).
- *
- * `GET /api/v1/events` hace upgrade a WebSocket y suscribe al
- * `EventBus`; desde ahi recibe solo eventos posteriores a la conexion
- * (transiciones de alertas y corridas de health checks), como JSON con
- * `type` como tag. No hay replay: el historial sigue en la REST API.
- *
- * Autenticacion: mismo bearer token que el resto de la API, pero un
- * `WebSocket` de navegador no deja setear headers, asi que se acepta el
- * token tambien por query param `?token=...`. Se valida antes del
- * upgrade (constante de tiempo, auth.rs). Sin token valido -> 401.
+ * GET /api/v1/events: upgrade a WebSocket. El cliente recibe eventos
+ * posteriores a la conexion (transiciones de alertas y corridas de health
+ * checks) como JSON con "type" como discriminante. El historial previo se
+ * consulta por REST. El token se acepta tambien como query param ?token=
+ * porque los WebSockets de navegador no permiten enviar headers custom.
  */
 
 #[derive(Debug, Deserialize)]
@@ -885,12 +855,9 @@ async fn events_handler(
     Ok(ws.on_upgrade(move |socket| handle_socket(socket, rx)))
 }
 
-/*
- * Maneja una conexion: reenvia los eventos del bus al socket y responde
- * pings (para que proxies/intermediarios no corten conexiones idle).
- * Textos del cliente se ignoran; un Close del lado cliente o un error de
- * envio terminan el bucle.
- */
+/* Maneja una conexion WebSocket: reenvio de eventos del bus, respuesta
+ * a pings para mantener la conexion viva ante proxies, y cierre limpio
+ * ante errores de envio o Close del cliente. */
 async fn handle_socket(socket: WebSocket, mut rx: broadcast::Receiver<String>) {
     let (mut sink, mut stream) = socket.split();
     loop {
@@ -914,9 +881,8 @@ async fn handle_socket(socket: WebSocket, mut rx: broadcast::Receiver<String>) {
                             break;
                         }
                     }
-                    /* Suscriptor lento: broadcast descarto los eventos que
-                     * no pudo consumir. Avisamos y seguimos desde donde
-                     * viene (el dashboard puede refrescar el historial). */
+                    /* Suscriptor lento: se perdieron eventos. Se notifica al cliente
+                     * para que refresque el historial por REST. */
                     Err(broadcast::error::RecvError::Lagged(n)) => {
                         let notice = json!({
                             "type": "events_lagged",
@@ -937,9 +903,8 @@ async fn handle_socket(socket: WebSocket, mut rx: broadcast::Receiver<String>) {
 
 #[cfg(test)]
 mod tests {
-    /* El dashboard (Fase 7) se sirve desde disco junto al manifest: un
-     * backend sin su frontend es un arranque roto en vivo. Este test
-     * pinchea el bundle frente a olvidos de commit. */
+    /* El dashboard se sirve desde disco junto al binario. Este test
+     * verifica que todos los archivos del bundle esten presentes. */
     #[test]
     fn dashboard_index_html_exists_next_to_manifest() {
         let root = env!("CARGO_MANIFEST_DIR");

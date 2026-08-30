@@ -10,11 +10,8 @@ use crate::health::{CheckOutcome, CurrentCheckState, StateUpdate};
 use crate::reboot::detect_reboot;
 use crate::state::ConnectivityState;
 
-/*
- * Acceso a PostgreSQL. El pool se crea al startup; las migraciones se
- * embeben en el binario (sqlx::migrate! con `collector/migrations/`) y
- * se aplican al arrancar, asi no hace falta sqlx-cli para desplegar.
- */
+/* Capa de acceso a PostgreSQL. Las migraciones se embeben en el binario
+ * y se aplican al arrancar; no se requiere sqlx-cli para desplegar. */
 
 pub async fn connect(url: &str, max_connections: u32) -> Result<PgPool, sqlx::Error> {
     PgPoolOptions::new()
@@ -28,17 +25,10 @@ pub async fn run_migrations(pool: &PgPool) -> Result<(), sqlx::migrate::MigrateE
 }
 
 /*
- * Registro de agentes implicito (ADR-0003): no hay endpoint de registro
- * en el protocolo del agent (los payloads solo identifican al agent por
- * agent_id), asi que el primer heartbeat o sample valido crea/actualiza
- * la fila en `agents`. La maquina de estados ONLINE/DEGRADED/OFFLINE es
- * Fase 4; aca solo se mantiene first_seen/last_seen.
- *
- * last_seen usa la hora de ARRIBO al servidor (SQL now()), no el
- * timestamp que reporta el agent: para liveness importa "cuando oimos del
- * agent", y el reloj del host puede tener skew (hasta 60s aceptado). Con
- * el dato del cliente, un host con reloj corrido quedaria marcado como
- * offline estando vivo.
+ * Registro implicito de agentes: el primer heartbeat o sample valido crea
+ * la fila en agents si no existe. last_seen usa la hora de arribo al
+ * servidor (now()), no el timestamp del agente, para que el liveness no
+ * dependa del reloj del host.
  */
 pub async fn upsert_agent(pool: &PgPool, agent_id: &Uuid) -> Result<(), sqlx::Error> {
     sqlx::query(
@@ -53,18 +43,13 @@ pub async fn upsert_agent(pool: &PgPool, agent_id: &Uuid) -> Result<(), sqlx::Er
 }
 
 /*
- * Ingestion de un sample completo + deteccion de reboot (bloque 4.3), en
- * una sola transaccion:
- *   1. Lock del agente (SELECT ... FOR UPDATE) para serializar los
- *      samples del mismo host: dos ingestiones concurrentes no pueden
- *      leer el mismo uptime previo y duplicar o perder un reboot.
- *   2. Ultimo `system.uptime` conocido del agente (entity NULL).
- *   3. Si el uptime actual cayo mas que la tolerancia -> reboot: se
- *      registra en `reboot_events`.
+ * Ingestion de un sample completo con deteccion de reboot en una sola
+ * transaccion:
+ *   1. Lock del agente (SELECT FOR UPDATE) para serializar ingestiones
+ *      concurrentes y evitar duplicados en reboot_events.
+ *   2. Ultimo system.uptime conocido del agente.
+ *   3. Si el uptime actual cayo mas que la tolerancia -> reboot registrado.
  *   4. Insert de las metricas con UNNEST de tres arrays paralelos.
- *
- * Los escalares llevan entity = NULL; las metricas por-entidad lo llevan
- * con el label correspondiente.
  */
 pub async fn ingest_sample(
     pool: &PgPool,
@@ -141,11 +126,8 @@ pub async fn ingest_sample(
     })
 }
 
-/*
- * Query API (Fase 4, bloque 1). Endpoints GET de solo lectura. Las
- * consultas explotan los indices de `metric_samples` que ya dejamos para
- * esto en 0001_init.sql (lookup (agent_id, metric_name, entity, ts DESC)).
- */
+/* Consultas de solo lectura. Explotan el indice compuesto
+ * (agent_id, metric_name, entity, ts DESC) de metric_samples. */
 
 #[derive(FromRow)]
 pub struct AgentRow {
@@ -165,10 +147,8 @@ pub async fn list_agents(pool: &PgPool) -> Result<Vec<AgentRow>, sqlx::Error> {
     Ok(rows)
 }
 
-/*
- * Un agente puntual. El estado de conectividad se deriva en el handler
- * (bloque 4.2) a partir de `last_seen`; aca solo se trae el dato.
- */
+/* Agente individual. El estado de conectividad se deriva en el handler
+ * a partir de last_seen; aqui solo se trae el dato. */
 pub async fn get_agent(pool: &PgPool, agent_id: &Uuid) -> Result<Option<AgentRow>, sqlx::Error> {
     sqlx::query_as::<_, AgentRow>(
         "SELECT agent_id, first_seen, last_seen
@@ -191,11 +171,9 @@ pub struct SeriesMeta {
 }
 
 /*
- * Series de un agente: una fila por (metric_name, entity) con el conteo de
- * muestras, el rango temporal y el ultimo valor. El ultimo valor sale de
- * una subconsulta correlacionada (mismo agente+metrica+entidad, ts mas
- * reciente) para que la vista "host" del dashboard no tenga que pedir la
- * serie completa.
+ * Series de un agente: una fila por (metric_name, entity) con conteo,
+ * rango temporal y ultimo valor via subconsulta correlacionada, para que
+ * el dashboard no necesite descargar la serie completa.
  */
 pub async fn list_agent_series(
     pool: &PgPool,
@@ -270,7 +248,7 @@ pub async fn query_series(
 }
 
 /*
- * Timeline de reboots (bloque 4.3): eventos detectados de un agent,
+ * Timeline de reboots: eventos detectados de un agente,
  * mas recientes primero.
  */
 #[derive(Serialize, FromRow)]
@@ -338,11 +316,8 @@ pub struct IngestReport {
     pub uptime_after: Option<f64>,
 }
 
-/*
- * Alert engine (Fase 5, bloque 5.1): persistencia de reglas declarativas
- * y lectura de las series que evalua el evaluador periodico. La maquina
- * de estados (bloque 5.2) y el historial (bloque 5.3) vienen despues.
- */
+/* Persistencia de reglas de alerta y lectura de las series sobre las
+ * que corre el evaluador periodico. */
 
 #[derive(FromRow)]
 pub struct AlertRuleRow {
@@ -448,7 +423,7 @@ pub async fn recent_samples_for_rule(
 }
 
 /*
- * Maquina de estados (bloque 5.2): el evaluador persiste el estado actual
+ * Persistencia del estado actual de alertas activas (tabla alerts).
  * por (rule, agent) en `alerts`. Aplicacion de los pasos del ciclo en una
  * sola transaccion: UPSERT (crear/actualizar), arrancar la ventana de
  * resolucion (hysteresis) o borrar la fila (RESOLVED).
@@ -551,7 +526,7 @@ pub async fn apply_alert_steps(pool: &PgPool, ops: &[AlertOp]) -> Result<(), sql
 }
 
 /*
- * Query API (bloque 5.3): alertas activas (pending/firing) con contexto
+ * Alertas activas (pending/firing) con contexto
  * de la regla, filtrables por agent y estado.
  */
 
@@ -592,7 +567,7 @@ pub async fn list_active_alerts(
 }
 
 /*
- * Query API (bloque 5.3): historial de transiciones en `alert_events`
+ * Historial de transiciones en alert_events
  * ("activas y resueltas"): filtrable por agent, regla y rango de tiempo.
  */
 
@@ -637,7 +612,7 @@ pub async fn list_alert_history(
 }
 
 /*
- * Health checks (Fase 6, bloque 6.1): definiciones, resultados y estado
+ * Health checks: definiciones, resultados y estado
  * actual. Una corrida es un INSERT en `health_check_results` + UPSERT de
  * `health_check_states` (transicion up/down calculada en health::next_state,
  * con `since` conservado mientras no cambie), en una sola transaccion.
@@ -837,7 +812,7 @@ pub async fn list_health_results(
 }
 
 /*
- * Eventos de conectividad (Fase 6, bloque 6.3).
+ * Eventos de conectividad.
  *
  * El runner (connectivity.rs) recorre los agentes del sistema, compara
  * el estado derivado contra `last_connectivity_state` y, ante un cambio,
@@ -922,7 +897,7 @@ pub async fn list_connectivity_events(
 }
 
 /*
- * Historial unificado (Fase 6, bloque 6.3): la vista "todo lo que paso"
+ * Historial unificado: la vista de todo lo que paso
  * del dashboard, fusionando las cuatro fuentes de eventos
  * (alertas, health, reboots y conectividad) ordenadas por ts DESC.
  * Cada fuente aporta filas con su `ts`; el merge (query.rs) las cruza en
@@ -983,13 +958,8 @@ pub async fn list_recent_reboots(
     .await
 }
 
-/*
- * Summary de salud (Fase 6, bloque 6.3): conteos agregados para el
- * overview del dashboard. Los estados de conectividad se derivan en el
- * handler con la misma funcion pura que el resto del query API (bloque
- * 4.2); aca se traen las filas minimas: agents (last_seen), checks
- * (estado actual) y el estado de las alertas activas.
- */
+/* Conteos agregados para el summary del dashboard: agents (last_seen),
+ * estado actual de checks y alertas activas. */
 
 #[derive(FromRow)]
 pub struct AgentLivenessRow {

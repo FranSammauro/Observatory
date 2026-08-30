@@ -5,12 +5,9 @@
 #include "logging.h"
 
 /*
- * Configuracion del agent, cargada desde un archivo de texto plano
- * con formato `clave = valor` (una entrada por linea, '#' para comentarios).
- *
- * No usamos una libreria TOML/YAML externa a proposito: mantener el
- * agent con pocas dependencias es un requisito explicito del diseno
- * (informe tecnico, seccion 6.1 y 73.2 - anti premature optimization).
+ * Configuracion del agente cargada desde un archivo de texto plano con
+ * formato "clave = valor". No se usa ninguna libreria externa de parseo
+ * para mantener el numero de dependencias al minimo.
  */
 typedef struct {
     char collector_url[OBS_MAX_LINE];
@@ -27,14 +24,10 @@ typedef struct {
     log_level_t log_level;
 } obs_config_t;
 
-/* Carga defaults razonables (ver informe, seccion 24 y 26). */
 void config_set_defaults(obs_config_t *config);
-
-/* Parsea un archivo de configuracion y sobreescribe los defaults. */
 obs_status_t config_load(const char *path, obs_config_t *config);
 
-/* Parsea configuracion desde un buffer en memoria (lineas '\n').
- * Expuesto para fuzzing/tests sin tocar disco. */
+/* Expuesto para el harness de fuzzing. */
 void config_parse_text(const char *text, obs_config_t *config);
 
 #endif /* OBSERVER_CONFIG_H */

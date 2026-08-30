@@ -4,7 +4,7 @@ use tokio::sync::broadcast;
 use uuid::Uuid;
 
 /*
- * Canal de eventos realtime (Fase 6, bloque 6.2).
+ * Canal de eventos realtime para el WebSocket.
  *
  * Un `EventBus` (wrap de un `broadcast` de tokio) desacopla a los
  * productores (evaluador de alertas, runner de health checks) de los
@@ -55,7 +55,7 @@ pub enum Event {
         since: Option<DateTime<Utc>>,
     },
     /* Transicion del estado de conectividad derivado de un agent
-     * (ONLINE/DEGRADED/OFFLINE, bloque 6.3): el runner detecta un cambio
+     * (ONLINE/DEGRADED/OFFLINE): el runner detecta un cambio
      * contra el ultimo estado persistido y lo emite al bus. */
     ConnectivityEvent {
         agent_id: Uuid,
@@ -113,7 +113,7 @@ impl Event {
         }
     }
 
-    /* Evento de cambio de estado de conectividad de un agent (bloque
+    /* Evento de cambio de estado de conectividad de un agente (publicado
      * 6.3). `from` es None en la primera observacion (no sabemos el
      * estado previo). */
     pub fn connectivity(agent_id: Uuid, from: Option<&str>, to: &str, ts: DateTime<Utc>) -> Self {

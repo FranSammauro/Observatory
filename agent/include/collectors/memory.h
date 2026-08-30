@@ -4,12 +4,12 @@
 #include "agent.h"
 
 /*
- * Collector de memoria (informe tecnico, seccion 10).
+ * Collector de memoria desde /proc/meminfo.
  *
- * Se prioriza MemAvailable (cuando el kernel lo expone) por sobre un
- * calculo naive de MemFree, ya que MemAvailable ya tiene en cuenta
- * cache/buffers reclamables. Esto coincide con la recomendacion de las
- * OpenTelemetry Semantic Conventions para metricas de sistema en Linux.
+ * Se prioriza MemAvailable sobre MemFree porque ya descuenta cache y
+ * buffers reclamables, dando una estimacion mas precisa de la memoria
+ * realmente disponible para nuevas asignaciones. En kernels que no
+ * exponen MemAvailable se usa MemFree como fallback.
  */
 
 typedef struct {
@@ -18,11 +18,10 @@ typedef struct {
     unsigned long long swap_total_kb;
     unsigned long long swap_free_kb;
 
-    double mem_utilization;    /* ratio 0..1 */
-    double swap_utilization;   /* ratio 0..1 */
+    double mem_utilization;   /* ratio en [0, 1] */
+    double swap_utilization;  /* ratio en [0, 1] */
 } memory_metrics_t;
 
-/* Lee /proc/meminfo y calcula las metricas de memoria/swap. */
 obs_status_t memory_collect(memory_metrics_t *out);
 
 /* Expuesto para tests: parsea el contenido completo de /proc/meminfo. */

@@ -2,11 +2,9 @@
 #define OBSERVER_LOGGING_H
 
 /*
- * Logging minimalista, sin dependencias externas.
- *
- * Reglas (informe tecnico, seccion 55):
- *  - Nunca loguear: token, password, Authorization header, secrets.
- *  - Cada linea incluye: timestamp, level, component.
+ * Logger minimalista sin dependencias externas.
+ * Tokens sensibles (bearer token, cabeceras de autorizacion) nunca
+ * deben aparecer en los mensajes de log.
  */
 
 typedef enum {
@@ -17,10 +15,7 @@ typedef enum {
     LOG_ERROR
 } log_level_t;
 
-/* Inicializa el logger. min_level filtra que se imprime. */
 void log_init(log_level_t min_level);
-
-/* Log con componente explicito, printf-style. */
 void log_log(log_level_t level, const char *component, const char *fmt, ...);
 
 #define LOG_TRACE_(component, ...) log_log(LOG_TRACE, component, __VA_ARGS__)

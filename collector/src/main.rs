@@ -37,10 +37,8 @@ async fn main() {
         }
     };
 
-    /* Crimtografia de rustls (Fase 8, bloque 8.2): axum-server no instala
-     * el provider; hay que hacerlo antes de construir el ServerConfig. Es
-     * idempotente: si otro crate ya instalo uno, esto devuelve Err y se
-     * ignora. */
+    /* axum-server requiere que el crypto provider de rustls se instale
+     * explicitamente antes de construir el ServerConfig. Es idempotente. */
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
     let event_bus = events::EventBus::new(config.ws_channel_capacity);

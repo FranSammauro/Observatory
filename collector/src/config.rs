@@ -11,53 +11,38 @@ pub const MAX_ARRAY_ENTRIES: usize = 16;
  * cliente descompuesto/malicioso inyecte miles de series por sample. */
 pub const MAX_METRIC_KEYS: usize = 1024;
 
-/* Limites del query API (Fase 4, bloque 1): cuantos puntos devolver por
- * serie. Topes defensivos contra peticiones gigantes; el dashboard pide
- * rangos cortos (~centenas de puntos). */
+/* Limites del query API: cuantos puntos devolver por serie. Topes
+ * defensivos contra peticiones gigantes. El dashboard pide rangos cortos. */
 pub const DEFAULT_SERIES_POINTS: i64 = 1_000;
 pub const MAX_SERIES_POINTS: i64 = 10_000;
 
-/* Timeline de reboots (bloque 4.3): eventos infrecuentes, alcanza con
- * menos margen que una serie. */
+/* Timeline de reboots: eventos infrecuentes, limite mas conservador. */
 pub const DEFAULT_REBOOTS_LIMIT: i64 = 50;
 pub const MAX_REBOOTS_LIMIT: i64 = 1_000;
 
-/* Historial de alertas (bloque 5.3): mismo criterio que reboots, son
- * transiciones de estado (infrecuentes), con margen defensivo. */
+/* Historial de alertas: transiciones de estado infrecuentes. */
 pub const DEFAULT_ALERT_HISTORY_LIMIT: i64 = 50;
 pub const MAX_ALERT_HISTORY_LIMIT: i64 = 1_000;
 
-/* Timeline de health checks (Fase 6, bloque 6.1): una corrida por
- * intervalo, eventos de tamano acotado; mismo criterio que reboots. */
+/* Timeline de health checks: una corrida por intervalo. */
 pub const DEFAULT_HEALTH_RESULTS_LIMIT: i64 = 50;
 pub const MAX_HEALTH_RESULTS_LIMIT: i64 = 1_000;
 
-/* Historial unificado (Fase 6, bloque 6.3): ultimos eventos del sistema
- * fusionando alertas + health + reboots + conectividad. Mismo criterio
- * que los timelines individuales. */
+/* Historial unificado: eventos de alertas, health, reboots y
+ * conectividad fusionados en orden cronologico. */
 pub const DEFAULT_EVENTS_HISTORY_LIMIT: i64 = 50;
 pub const MAX_EVENTS_HISTORY_LIMIT: i64 = 1_000;
 
-/*
- * WebSocket de eventos realtime (bloque 6.2): capacidad de la cola por
- * suscriptor. Los eventos son infrecuentes (transiciones de alertas +
- * corridas de checks), 256 eventos bufferizados cubren holgadamente los
- * intervalos lanzos; un suscriptor mas lento que la cola recibe un
- * aviso `events_lagged` y sigue desde donde viene (broadcast descarta,
- * no bloquea).
- */
+/* Capacidad del canal de broadcast del WebSocket por suscriptor.
+ * Un suscriptor lento recibe un aviso events_lagged; el broadcast
+ * descarta sin bloquear al productor. */
 
-/* Evaluador de alertas (bloque 5.1): cada cuanto evaluar las reglas y
- * que ventana de `metric_samples` mirar. El intervalo es ~el periodo de
- * metricas del agent (10s); 15s da 1.5 evaluaciones por muestra. El
- * lookback de 5 min cubre holgadamente `for_secs` tipicos sin arrastrar
- * datos muertos.
+/* Intervalo y ventana de lookback del evaluador de alertas.
+ * El lookback debe cubrir los for_secs tipicos de las reglas con margen.
  *
- * Hysteresis (bloque 5.2): ventana de resolucion. Una alerta FIRING no
- * se resuelve apenas la condicion deja de sostenerse; se mantiene hasta
- * OBS_ALERT_RESOLVE_GRACE_SECS sin condicion, asi un valor que oscila
- * alrededor del umbral no flapea entrada/salida. 60s = 4 ciclos del
- * evaluador (15s) o ~6 muestras de metricas (10s). */
+ * Ventana de hysteresis: una alerta FIRING no se resuelve al instante
+ * al caer la condicion; espera OBS_ALERT_RESOLVE_GRACE_SECS sin
+ * condicion sostenida para evitar flapping. */
 
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -211,8 +196,8 @@ impl Config {
         })
     }
 
-    /* Umbrales de la maquina de conectividad (bloque 4.2): compartidos
-     * por los handlers de query y el runner de conectividad (6.3). */
+    /* Umbrales compartidos entre los handlers de query y el runner
+     * de conectividad. */
     pub fn state_limits(&self) -> StateLimits {
         StateLimits {
             online_secs: self.state_online_secs,
@@ -221,10 +206,7 @@ impl Config {
     }
 }
 
-/*
- * Caida minima de uptime para considerarla un reboot (bloque 4.3): no
- * puede ser negativa (una caida es una caida).
- */
+/* Caida minima de uptime para considerarla un reboot. Debe ser >= 0. */
 pub fn validate_reboot_drop(min_drop_secs: f64) -> Result<(), String> {
     if min_drop_secs.is_finite() && min_drop_secs >= 0.0 {
         Ok(())
@@ -233,11 +215,8 @@ pub fn validate_reboot_drop(min_drop_secs: f64) -> Result<(), String> {
     }
 }
 
-/*
- * Umbrales de la maquina de estados (bloque 4.2): online_secs <=
- * degraded_secs y ninguno negativo. Falla ruidoso al arrancar, igual que
- * el resto de la validacion de config (filosofia ADR-0002/0003).
- */
+/* Umbrales de la maquina de estados: online_secs <= degraded_secs,
+ * ninguno negativo. Falla al arrancar si la configuracion es invalida. */
 pub fn validate_state_limits(online_secs: i64, degraded_secs: i64) -> Result<(), String> {
     if online_secs < 0 {
         return Err("OBS_STATE_ONLINE_SECS no puede ser negativo".to_string());
@@ -250,10 +229,7 @@ pub fn validate_state_limits(online_secs: i64, degraded_secs: i64) -> Result<(),
     Ok(())
 }
 
-/*
- * Evaluador de alertas (bloque 5.1): intervalo y ventana deben ser
- * positivos (un ciclo cada 0s o una ventana vacia no tienen sentido).
- */
+/* Intervalo y ventana del evaluador deben ser positivos. */
 pub fn validate_alert_limits(interval_secs: i64, lookback_secs: i64) -> Result<(), String> {
     if interval_secs <= 0 {
         return Err("OBS_ALERT_EVAL_INTERVAL_SECS debe ser mayor que 0".to_string());
@@ -264,10 +240,7 @@ pub fn validate_alert_limits(interval_secs: i64, lookback_secs: i64) -> Result<(
     Ok(())
 }
 
-/*
- * Hysteresis del bloque 5.2: la ventana de resolucion no puede ser
- * negativa (0 = resolver apenas la condicion deja de sostenerse).
- */
+/* La ventana de hysteresis no puede ser negativa. 0 = resolucion inmediata. */
 pub fn validate_alert_grace(grace_secs: i64) -> Result<(), String> {
     if grace_secs < 0 {
         return Err("OBS_ALERT_RESOLVE_GRACE_SECS no puede ser negativo".to_string());
@@ -275,10 +248,8 @@ pub fn validate_alert_grace(grace_secs: i64) -> Result<(), String> {
     Ok(())
 }
 
-/*
- * Health checks (Fase 6, bloque 6.1): el scheduler no puede tener paso 0
- * y el timeout default de un check tiene que ser positivo y acotado.
- */
+/* El scheduler de health checks no puede tener paso 0. El timeout por
+ * defecto debe ser positivo y estar dentro del rango aceptado. */
 pub fn validate_health_poll(poll_secs: i64) -> Result<(), String> {
     if poll_secs < 1 {
         return Err("OBS_HEALTH_POLL_SECS debe ser mayor o igual a 1".to_string());
@@ -295,10 +266,7 @@ pub fn validate_health_timeout(timeout_secs: i64) -> Result<(), String> {
     Ok(())
 }
 
-/*
- * Canal de eventos del WebSocket (bloque 6.2): una cola vacia (0) no
- * tiene sentido; un broadcast de tokio requiere capacidad >= 1.
- */
+/* El canal de broadcast requiere capacidad >= 1. */
 pub fn validate_ws_capacity(capacity: usize) -> Result<(), String> {
     if capacity >= 1 {
         Ok(())
@@ -307,11 +275,8 @@ pub fn validate_ws_capacity(capacity: usize) -> Result<(), String> {
     }
 }
 
-/*
- * Runner de conectividad (bloque 6.3): detecta transiciones del estado
- * derivado ONLINE/DEGRADED/OFFLINE. El intervalo no puede ser 0 ni
- * negativo; 5s default cubre bien la ventana de los umbrales (15s/60s).
- */
+/* El runner de conectividad detecta transiciones de estado. El intervalo
+ * no puede ser 0 ni negativo. */
 pub fn validate_connectivity_poll(poll_secs: i64) -> Result<(), String> {
     if poll_secs < 1 {
         return Err("OBS_CONNECTIVITY_POLL_SECS debe ser mayor o igual a 1".to_string());
@@ -319,11 +284,8 @@ pub fn validate_connectivity_poll(poll_secs: i64) -> Result<(), String> {
     Ok(())
 }
 
-/*
- * Rate limiting (Fase 8, bloque 8.1): si esta habilitado, rate y burst
- * deben ser positivos. Deshabilitado, ambos se ignoran (se pueden dejar
- * en 0). Falla ruidoso ante configuracion contradictoria.
- */
+/* Si el rate limiting esta habilitado, rate y burst deben ser positivos.
+ * Deshabilitado, los valores se ignoran. */
 pub fn validate_rate_limit(enabled: bool, rate: f64, burst: f64) -> Result<(), String> {
     if !enabled {
         return Ok(());
@@ -337,12 +299,8 @@ pub fn validate_rate_limit(enabled: bool, rate: f64, burst: f64) -> Result<(), S
     Ok(())
 }
 
-/*
- * TLS (Fase 8, bloque 8.2): el certificado y la clave privada van
- * siempre juntos. Falta ruidoso al arrancar si solo se seteo uno — un
- * TLS medio configurado (cert sin key, o viceversa) es peor que advertir
- * en claro, misma filosofia de errores que el resto de la config.
- */
+/* El certificado TLS y la clave privada deben ir siempre juntos.
+ * Configuracion incompleta (uno sin el otro) falla al arrancar. */
 pub fn validate_tls_pair(cert: Option<&PathBuf>, key: Option<&PathBuf>) -> Result<(), String> {
     match (cert, key) {
         (Some(_), Some(_)) => Ok(()),
@@ -356,12 +314,8 @@ pub fn validate_tls_pair(cert: Option<&PathBuf>, key: Option<&PathBuf>) -> Resul
     }
 }
 
-/*
- * Directorio del dashboard (Fase 7, bloque 7.1): se sirve tal cual, con
- * un solo saneamiento — quitar el `/` final para que ServeDir no falle
- * con un path tipo `dashboard/` duplicado al resolver index.html. No
- * puede quedar vacio.
- */
+/* Directorio del dashboard: se quita el slash final para que ServeDir
+ * no genere paths duplicados al resolver index.html. No puede estar vacio. */
 pub fn sanitize_dashboard_dir(raw: &str) -> Result<String, String> {
     let dir = raw.trim().trim_end_matches('/').to_string();
     if dir.is_empty() {

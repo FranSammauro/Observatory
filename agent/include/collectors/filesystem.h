@@ -4,10 +4,10 @@
 #include "agent.h"
 
 /*
- * Uso de filesystem (informe seccion 11). Se usa statvfs() sobre cada
- * mountpoint real listado en /proc/mounts (se filtran filesystems
- * virtuales/pseudo como proc, sysfs, tmpfs, cgroup, overlay, etc. -
- * ver la lista en filesystem.c - para no reportar cardinalidad inutil).
+ * Collector de uso de filesystem desde /proc/mounts + statvfs(). Solo
+ * se reportan filesystems reales (ext4, xfs, btrfs, etc.); los
+ * pseudo-filesystems (proc, sysfs, tmpfs, overlay, cgroup) se
+ * descartan para mantener la cardinalidad acotada.
  */
 
 typedef struct {
@@ -17,7 +17,7 @@ typedef struct {
 
     unsigned long long total_bytes;
     unsigned long long available_bytes;
-    double utilization; /* ratio 0..1 */
+    double utilization; /* ratio en [0, 1] */
 } filesystem_entry_t;
 
 typedef struct {
@@ -27,12 +27,8 @@ typedef struct {
 
 obs_status_t filesystem_collect(filesystem_metrics_t *out);
 
-/* true si `fs_type` es un filesystem "real" que nos interesa reportar
- * (no pseudo/virtual). Expuesto para tests. */
+/* Expuesto para tests. */
 bool filesystem_is_real_fs_type(const char *fs_type);
-
-/* Parsea una linea de /proc/mounts en device/mountpoint/fs_type.
- * Expuesto para tests. */
 obs_status_t filesystem_parse_mounts_line(const char *line,
                                            char *device, size_t device_size,
                                            char *mountpoint, size_t mountpoint_size,

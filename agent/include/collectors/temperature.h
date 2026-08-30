@@ -4,14 +4,14 @@
 #include "agent.h"
 
 /*
- * Temperatura (informe seccion 16) - metrica explicitamente opcional.
- * Busca sensores bajo /sys/class/thermal/thermal_zone*. Si no hay
- * ninguno disponible, `available=false` NO se considera un error.
+ * Temperatura del sistema desde /sys/class/thermal/thermal_zone*.
+ * Metrica opcional: si no hay sensores disponibles, available queda en
+ * false y no se considera un error de coleccion.
  */
 
 typedef struct {
     bool available;
-    double celsius; /* solo valido si available == true */
+    double celsius;
 } temperature_metrics_t;
 
 obs_status_t temperature_collect(temperature_metrics_t *out);

@@ -1,176 +1,123 @@
 # observer-agent
 
-Agente de observabilidad en C para hosts Linux, escrito con un presupuesto
-de recursos explícito: pocas dependencias, sin llamadas a binarios externos
-(`top`, `free`, `ps`, ...), lectura directa de `/proc` y `/sys`.
+Agente de monitoreo en C para hosts Linux. Recolecta metricas del sistema
+directamente desde las interfaces del kernel sin depender de herramientas
+externas como `top`, `free` o `df`, y las envia periodicamente al collector
+central.
 
-> Estado actual: **Fase 2** — resto de collectors (disk, network,
-> filesystem, uptime, process, temperature), transporte HTTP real sobre
-> sockets POSIX, heartbeat como canal independiente de las métricas,
-> retry con backoff exponencial + jitter, e identidad persistente del
-> agent. Ver [`../PHASES.md`](../PHASES.md).
+## Metricas recolectadas
 
-## Por qué C
+| Fuente | Metricas |
+|---|---|
+| `/proc/stat` | CPU: utilizacion, user, system, iowait (delta entre snapshots) |
+| `/proc/meminfo` | Memoria y swap: total, disponible, utilizacion |
+| `/proc/diskstats` | I/O por disco: bytes/s, operaciones/s (discos completos, sin particiones) |
+| `/proc/net/dev` | Trafico por interfaz: rx/tx bytes/s, paquetes/s, errores acumulados |
+| `/proc/mounts` + `statvfs()` | Filesystem: total, disponible, utilizacion por punto de montaje |
+| `/proc/uptime` | Uptime del sistema en segundos |
+| `/proc/<pid>/stat` | Conteo agregado de procesos por estado |
+| `/sys/class/thermal/` | Temperatura (opcional; ausencia no es error) |
 
-Ver [`docs/adr/0001-agent-language.md`](../docs/adr/0001-agent-language.md).
-En resumen: el agente necesita interactuar directamente con interfaces
-POSIX/Linux y mantener un footprint mínimo (objetivo de diseño: < 5 MB RSS,
-< 1% CPU promedio en el hardware de referencia), y eso pesa más que la
-comodidad de un runtime más pesado.
-
-## Transporte: HTTP plano por ahora, TLS en Fase 8
-
-Ver [`docs/adr/0002-transport-protocol.md`](../docs/adr/0002-transport-protocol.md).
-`collector_url` debe empezar con `http://` en esta fase — `https://` es
-rechazado explícitamente (con un error claro) en vez de degradar
-silenciosamente a texto plano. **No usar sobre una red no confiable
-todavía.**
+Las metricas basadas en delta (CPU, disco, red) requieren dos lecturas
+para calcular la tasa. El primer ciclo establece el punto de referencia;
+los datos aparecen a partir del segundo intervalo.
 
 ## Build
 
 ```sh
-make            # build de release (-O2)
-make debug      # build de debug (-O0 -g)
-make sanitize   # ASan + UBSan + LSan: compila binario + tests + fuzz,
-                #   corre los unit tests y 200.000 iteraciones de fuzzing
-make test       # compila y corre los tests unitarios
-make fuzz       # corre el harness de fuzzing deterministico (200.000 iters)
+make              # release con -O2
+make debug        # -O0 -g
+make sanitize     # AddressSanitizer + UndefinedBehaviorSanitizer + LeakSanitizer
+make test         # compila y ejecuta los 11 test suites
+make fuzz         # harness deterministico sobre transport y config parser
 make clean
 ```
 
-Tras `make sanitize`, volver a los modos normales requiere `make clean`
-(no mezclar los `.o` instrumentados con el link normal).
+Requiere un compilador C11 (`gcc` o `clang`) y `make`. Sin dependencias
+externas.
 
-Requiere un compilador C11 (`cc`/`gcc`/`clang`) y `make`. Sin dependencias
-externas. El fuzzing es un surge harness mínimo (corpus real + mutación
-estructural determinista con RNG xorshift64) en `tests/fuzz.c`, sin
-`clang`/libFuzzer; recorre `transport_parse_url`,
-`transport_parse_status_line` y `config_parse_text`.
+## Configuracion
 
-## Uso
-
-```sh
-./observer-agent [ruta/a/agent.conf]
-```
-
-Si no se pasa ruta, busca `/etc/observer/agent.conf`. Si el archivo no
-existe, corre con valores por defecto (ver `config_set_defaults` en
-`src/config.c`) y lo indica por log — no es un error fatal.
-
-El agent corre en foreground (para ejecutarlo como daemon, envolverlo en
-un unit de systemd — pendiente para una fase posterior). Cada
-`metrics_interval_secs` recolecta una muestra completa y la envía por
-`POST {collector_url}/api/v1/metrics`; cada `heartbeat_interval_secs`
-(canal independiente, ver informe sección 24) envía un heartbeat liviano
-por `POST {collector_url}/api/v1/agents/heartbeat`. Ambos incluyen
-`Authorization: Bearer {agent_token}` si está configurado.
-
-Si un envío falla (Collector caído, timeout, respuesta no-2xx), el
-agent no bloquea el resto del loop: aplica backoff exponencial + jitter
-(1s, 2s, 4s, 8s, 16s, 30s, 30s...) antes del próximo intento **de ese
-canal**, y sigue recolectando/enviando el otro canal normalmente. En el
-próximo intento se envía una muestra fresca, no la vieja (informe
-sección 27: sin buffer local en V1).
-
-## Configuración
-
-Formato plano `clave = valor`, una entrada por línea, `#` para comentarios:
+Archivo de texto plano con formato `clave = valor`. Si el archivo no
+existe al arrancar, el agente usa valores por defecto y continua.
 
 ```ini
-# /etc/observer/agent.conf
 collector_url = http://collector.local:8080
-agent_token = <token>
+agent_token   = <token>
 agent_id_path = /etc/observer/agent-id
 
-metrics_interval_secs = 10
+metrics_interval_secs   = 10
 heartbeat_interval_secs = 5
 
 connect_timeout_secs = 3
-write_timeout_secs = 3
-read_timeout_secs = 5
+write_timeout_secs   = 3
+read_timeout_secs    = 5
 
 log_level = info
 ```
 
-`collector_url` debe usar `http://` en esta fase (ver nota de TLS más
-arriba). Se eligió deliberadamente no usar una librería TOML/YAML
-externa: el formato es simple y esto mantiene el binario liviano y con
-pocas dependencias.
+`collector_url` debe usar `http://`. El agente no implementa TLS; ver
+`docs/adr/0002-transport-protocol.md` para la justificacion y la
+arquitectura de red recomendada.
 
-## Identidad del agent
+## Identidad del agente
 
-El agent NO depende del hostname para identificarse (informe sección
-20): la primera vez que corre, genera un id aleatorio de 128 bits
-(vía `/dev/urandom`) y lo persiste en `agent_id_path` (default
-`/etc/observer/agent-id`) con permisos `0600`. Corridas siguientes
-reutilizan ese mismo id. Si el archivo no se puede crear/leer (permisos,
-directorio inexistente), el agent sigue funcionando con un id generado
-en memoria solo para esa ejecución — no es un error fatal, pero no
-sobrevive a un reinicio.
+Al arrancar por primera vez, el agente genera un identificador de 128 bits
+desde `/dev/urandom` y lo persiste en `agent_id_path` con permisos `0600`.
+Reinicios posteriores reutilizan el mismo identificador, de modo que la
+identidad del host no depende del hostname ni de la direccion IP.
 
-## Estructura
+## Transporte y reintentos
+
+El agente mantiene dos canales independientes programados con
+`CLOCK_MONOTONIC`: uno para las metricas y otro para el heartbeat. Ante un
+fallo de envio en cualquiera de los dos, se aplica backoff exponencial con
+jitter (1s, 2s, 4s, 8s, 16s, 30s, 30s...) sin bloquear al otro canal. No
+se almacena la muestra fallida; el siguiente ciclo envia datos frescos.
+
+## Estructura del codigo
 
 ```
 agent/
 ├── src/
-│   ├── main.c              # loop principal (scheduling monotonic, retry)
-│   ├── config.c            # parser de configuración
-│   ├── agent.c              # utilidades comunes (status codes)
-│   ├── protocol.c           # serialización JSON (sample + heartbeat)
-│   ├── transport.c          # cliente HTTP sobre sockets POSIX
-│   ├── retry.c               # backoff exponencial + jitter
-│   ├── identity.c            # identidad persistente del agent
-│   ├── logging.c            # logger con niveles
+│   ├── main.c                    Loop principal, scheduling, envio
+│   ├── config.c                  Parser de configuracion
+│   ├── logging.c                 Logger con niveles TRACE..ERROR
+│   ├── protocol.c                Serializador JSON del payload
+│   ├── transport.c               Cliente HTTP sobre sockets POSIX
+│   ├── retry.c                   Backoff exponencial con jitter
+│   ├── identity.c                Identidad persistente del agente
+│   ├── agent.c                   Utilidades comunes
 │   └── collectors/
-│       ├── cpu.c            # /proc/stat, delta-based utilization
-│       ├── memory.c         # /proc/meminfo
-│       ├── disk.c            # /proc/diskstats, tasas de I/O
-│       ├── network.c        # /proc/net/dev, tasas por interfaz
-│       ├── filesystem.c     # /proc/mounts + statvfs()
-│       ├── uptime.c         # /proc/uptime
-│       ├── process.c        # /proc/<pid>/stat, conteo agregado
-│       └── temperature.c    # /sys/class/thermal (opcional)
-├── include/                  # headers correspondientes
-├── tests/                    # tests unitarios (sin framework externo)
+│       ├── cpu.c
+│       ├── memory.c
+│       ├── disk.c
+│       ├── network.c
+│       ├── filesystem.c
+│       ├── uptime.c
+│       ├── process.c
+│       └── temperature.c
+├── include/                      Headers correspondientes
+├── tests/                        Test suites unitarios (sin framework externo)
 ├── Makefile
 └── README.md
 ```
 
 ## Tests
 
-`make test` compila y corre 11 suites (`test_cpu`, `test_memory`,
-`test_config`, `test_disk`, `test_network`, `test_filesystem`,
-`test_uptime`, `test_process`, `test_retry`, `test_transport`,
-`test_identity`). Son binarios standalone (sin framework externo) que
-usan un macro `CHECK()` simple y devuelven código de salida != 0 si algo
-falla — pensado para poder engancharlos directo a CI.
+Cada suite es un binario standalone que devuelve codigo de salida distinto
+de cero ante cualquier fallo, apto para integracion directa con CI.
 
-Casos cubiertos (además de lo ya descripto en Fase 1):
-
-- **Disk/Network**: parseo de `/proc/diskstats` y `/proc/net/dev`,
-  filtrado de particiones/loopback, contrato de "primera lectura sin
-  delta".
-- **Filesystem**: filtrado de filesystems pseudo/virtuales, parseo de
-  `/proc/mounts`, integración liviana contra el sistema real.
-- **Uptime/Process**: parseo, y ejecución real contra `/proc` del
-  contenedor (siempre hay al menos un proceso corriendo).
-- **Retry**: crecimiento exponencial del backoff, clamp al máximo,
-  reproducibilidad con la misma seed, manejo del caso seed=0.
-- **Transport**: parseo de URL (`http://`/`https://`, puertos
-  explícitos/default, errores de esquema/puerto inválido) — sin abrir
-  sockets.
-- **Identity**: generación + persistencia con permisos `0600`, reuso de
-  un id existente, manejo de archivo corrupto, argumentos inválidos.
-
-Validado además con una prueba de integración real (agent real +
-mock collector HTTP en Python) confirmando el flujo completo
-`collect → serialize → POST → retry` con backoff correcto ante fallos
-de conexión, y con `make sanitize` (ASan + UBSan + LSan) corriendo los
-suites + 200.000 iteraciones de fuzzing sin hallazgos.
-
-## Próximos pasos (Fase 3+)
-
-- Collector en Rust: registro de agentes, ingestion con validación,
-  autenticación por bearer token, persistencia en PostgreSQL.
-- TLS en el transporte del agent (Fase 8, ver ADR-0002).
-- Generación de un unit de systemd para correr el agent como daemon.
+| Suite | Cobertura |
+|---|---|
+| `test_cpu` | Parseo de `/proc/stat`, calculo de delta, deteccion de counter reset |
+| `test_memory` | Parseo de `/proc/meminfo`, fallback de MemAvailable a MemFree |
+| `test_config` | Carga de archivo, overrides parciales, claves desconocidas |
+| `test_disk` | Filtrado de particiones, parseo de `/proc/diskstats`, contrato de primer ciclo |
+| `test_network` | Parseo de `/proc/net/dev`, filtrado de loopback |
+| `test_filesystem` | Filtrado de pseudo-filesystems, parseo de `/proc/mounts` |
+| `test_uptime` | Parseo de `/proc/uptime` |
+| `test_process` | Normalizacion de estados de proceso, coleccion real contra `/proc` |
+| `test_retry` | Crecimiento exponencial, clamp al maximo, reproducibilidad con misma seed |
+| `test_transport` | Parser de URL (esquemas, puertos, errores) sin abrir sockets |
+| `test_identity` | Generacion, persistencia (permisos 0600), reuso de id existente, archivo corrupto |

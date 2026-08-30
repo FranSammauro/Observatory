@@ -12,25 +12,17 @@ use crate::state::{
 };
 
 /*
- * Runner de eventos de conectividad (Fase 6, bloque 6.3).
+ * Runner de eventos de conectividad.
  *
- * El estado ONLINE/DEGRADED/OFFLINE (bloque 4.2) es una funcion pura que
- * se calcula al leer a partir de agents.last_seen; no hay un flujo de
- * transiciones porque nada lo registraba. Este runner le agrega la
- * "historia": cada OBS_CONNECTIVITY_POLL_SECS recorre los agentes,
- * calcula el estado derivado y lo compara contra el ultimo persistido en
- * `agents.last_connectivity_state`. Cuando cambia:
+ * El estado ONLINE/DEGRADED/OFFLINE se calcula como funcion pura de
+ * agents.last_seen. Este runner materializa el historial de transiciones:
+ * cada OBS_CONNECTIVITY_POLL_SECS compara el estado derivado contra el
+ * ultimo persistido en agents.last_connectivity_state. Cuando cambia,
+ * persiste la transicion en connectivity_events y la publica al bus.
  *
- *   1. persiste la transicion en `connectivity_events` (from -> to), y
- *   2. publica un `connectivity_event` al bus (WebSocket).
- *
- * La primera observacion de un agent (last_connectivity_state NULL)
- * registra la transicion con from = NULL, igual que la creacion de una
- * alerta en `alert_events`: el timeline "nacimiento del agent" queda en
- * la historia con su estado inicial.
- *
- * `ts` del evento = hora del ciclo que detecto el cambio (filosofia
- * last_seen, ADR-0003: importa cuando lo vimos).
+ * La primera observacion de un agente (last_connectivity_state NULL)
+ * genera una transicion con from=NULL, registrando el estado inicial
+ * en el timeline.
  */
 
 pub struct ConnectivityTransition {
@@ -40,10 +32,9 @@ pub struct ConnectivityTransition {
 }
 
 /*
- * Transiciones del ciclo (pura): para cada agente, si el estado derivado
- * difiere del ultimo persistido -> una transicion. La primera
- * observacion (NULL persistido) cuenta como transicion desde NULL, como
- * la creacion de alerta en el historial.
+ * Funcion pura: para cada agente, si el estado derivado difiere del
+ * ultimo persistido, genera una transicion. El estado NULL cuenta como
+ * primera observacion y siempre produce una transicion.
  */
 pub fn detect_transitions(
     agents: &[db::AgentConnectivityRow],
@@ -178,8 +169,8 @@ mod tests {
 
     #[test]
     fn stale_last_state_still_emits() {
-        /* last_connectivity_state quedo atrasado (guardado como online
-         * hace mucho): el derivado manda. */
+        /* last_connectivity_state desactualizado: el estado derivado
+         * tiene prioridad. */
         let agents = vec![row(A, 120, Some("online"))];
         let out = detect_transitions(&agents, Utc::now(), &limits());
         assert_eq!(out[0].from_state, Some(ConnectivityState::Online));

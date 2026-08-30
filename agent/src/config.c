@@ -34,7 +34,7 @@ void config_set_defaults(obs_config_t *config)
     snprintf(config->agent_id_path, sizeof(config->agent_id_path),
               "/etc/observer/agent-id");
 
-    /* Heartbeat independiente de metrics, ver informe seccion 24 */
+    /* Heartbeat a menor frecuencia que las metricas. */
     config->heartbeat_interval_secs = 5;
     config->metrics_interval_secs = 10;
 

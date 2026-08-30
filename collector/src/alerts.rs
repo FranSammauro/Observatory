@@ -12,16 +12,13 @@ use crate::error::ApiError;
 use crate::events::{Event as StreamEvent, EventBus};
 
 /*
- * Alert engine (Fase 5, bloque 5.1): reglas declarativas, evaluacion y
- * gestion por API.
+ * Motor de alertas: reglas declarativas y evaluacion de series.
  *
- * Una regla es declarativa: metric_name + entidad opcional + operador +
- * umbral (+ for_secs). La evaluacion es una funcion pura sobre la serie
- * que el engine lee de `metric_samples`: decide si la CONDICION se
- * sostiene sobre la muestra mas reciente y, cuando se sostiene, desde
- * cuando (alimenta el `for` de la maquina de estados del bloque 5.2).
- * Este bloque no persiste transiciones de estado: es el motor que el
- * bloque 5.2 va a consumir.
+ * Una regla define metric_name, entidad opcional, operador y umbral.
+ * La evaluacion es una funcion pura sobre la serie temporal: determina
+ * si la condicion se sostiene sobre la muestra mas reciente y, cuando
+ * lo hace, desde cuando (alimenta la duracion "for" de la maquina de
+ * estados).
  */
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -43,8 +40,8 @@ impl CondOp {
     }
 
     pub fn matches(&self, value: f64, threshold: f64) -> bool {
-        /* Un valor no finito nunca satisface una regla (defensa contra
-         * NaN/Inf, que de todos modos no pueden llegar a la DB). */
+        /* NaN e Inf no pueden llegar a la DB, pero se rechazan aqui
+         * tambien como defensa en profundidad. */
         if !value.is_finite() {
             return false;
         }
@@ -109,14 +106,11 @@ pub enum SeriesVerdict {
 }
 
 /*
- * Serie en orden temporal ASC (la query del evaluador ya la ordena).
- * Determina si la condicion se sostiene sobre la muestra mas reciente y
- * cuanto lleva sostenida: recorre hacia atras mientras las muestras sigan
- * cumpliendo. La duracion se calcula SOLO con timestamps de muestras
- * (last.ts - since), no con reloj: determinista ante el mismo dataset e
- * inmune al skew admitido en ingestion (hasta 60s). `now` solo cota
- * tramos futuros anomalos. Un hueco en los datos no corta el tramo (no
- * interpolamos: no sabemos el valor entre muestras).
+ * Serie en orden temporal ASC. Determina si la condicion se sostiene sobre
+ * la muestra mas reciente y cuanto lleva sostenida, retrocediendo mientras
+ * las muestras anteriores tambien cumplan. La duracion usa solo timestamps
+ * de muestras (no el reloj) para ser determinista e inmune al skew de
+ * ingestion. Un hueco en los datos no interrumpe el tramo: no se interpola.
  */
 pub fn evaluate_series(
     points: &[SeriesPoint],
@@ -232,23 +226,19 @@ impl CreateRule {
 }
 
 /*
- * Maquina de estados (bloque 5.2). Estados nominales del informe:
- * INACTIVE -> PENDING -> FIRING -> RESOLVED.
+ * Maquina de estados INACTIVE -> PENDING -> FIRING -> RESOLVED.
  *
- *   INACTIVE : no hay condicion sostenida. No se persiste (ausencia de
- *              fila en `alerts`).
- *   PENDING  : la condicion se sostiene pero todavia no alcanzo `for_secs`
- *              de la regla. Si deja de sostenerse antes -> RESOLVED.
- *   FIRING   : la condicion se sostuvo `for_secs` (o mas). Con
- *              hysteresis: no se resuelve apenas la condicion cae; se
- *              mantiene hasta que la condicion este ausente
- *              OBS_ALERT_RESOLVE_GRACE_SECS (evita flapping).
- *   RESOLVED : el tramo termino (PENDING que cae, o FIRING con ventana
- *              de resolucion vencida). No se persiste; la fila se borra.
+ *   INACTIVE : sin condicion sostenida. No se persiste (ausencia de fila).
+ *   PENDING  : condicion sostenida pero sin alcanzar for_secs todavia.
+ *              Si cae antes de alcanzarlo -> RESOLVED inmediato.
+ *   FIRING   : condicion sostenida for_secs o mas. Con hysteresis: no se
+ *              resuelve al instante al caer; espera OBS_ALERT_RESOLVE_GRACE_SECS
+ *              sin condicion antes de resolver (evita flapping).
+ *   RESOLVED : fin del tramo. La fila se borra de alerts.
  *
- * La transicion es una funcion pura (`next_step`) sobre el estado actual
- * y el veredicto de `evaluate_series` del bloque 5.1; el evaluador
- * aplica el resultado en `alerts` en una transaccion (db::apply_alert_steps).
+ * La transicion es una funcion pura sobre el estado actual y el veredicto
+ * de evaluate_series; el evaluador la aplica en alerts dentro de una
+ * transaccion.
  */
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -266,16 +256,14 @@ impl AlertState {
     }
 }
 
-/* Estado actual de una alerta activa, como lo devuelve la DB. Solo
- * importan el estado y la ventana de resolucion: `since` de la fila es
- * informativo y se reescribe en cada ciclo con el del veredicto. */
+/* Estado actual de una alerta activa desde la DB. */
 #[derive(Debug, Clone, Copy)]
 pub struct CurrentAlert {
     pub state: AlertState,
     pub resolve_from: Option<DateTime<Utc>>,
 }
 
-/* Condicion sostenida en este ciclo (veredicto del bloque 5.1 reducido). */
+/* Condicion sostenida en este ciclo de evaluacion. */
 #[derive(Debug, Clone, Copy)]
 pub struct Holding {
     pub since: DateTime<Utc>,
@@ -283,12 +271,9 @@ pub struct Holding {
 }
 
 /*
- * Paso de la maquina que el evaluador debe aplicar. Cada variante mapea a
- * una operacion de `alerts`:
- *   Inactive / StayResolving -> nada
- *   Pending/Firing/StayPending/ToFiring/StayFiring -> UPSERT
- *   StartResolving -> abrir la ventana de resolucion (resolve_from = now)
- *   Resolved -> DELETE
+ * Paso resultante de la maquina de estados. Mapea a operaciones sobre
+ * la tabla alerts: nada (Inactive/StayResolving), UPSERT, apertura de
+ * ventana de resolucion (StartResolving) o DELETE (Resolved).
  */
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Step {
@@ -355,11 +340,10 @@ pub fn next_step(
 }
 
 /*
- * Historial (bloque 5.3): una transicion de estado se registra en
- * `alert_events` solo cuando la maquina CAMBIA de estado (creacion,
- * promocion o resolucion). `from = None` significa desde INACTIVE (no
- * habia fila). Stay* / StartResolving / StayResolving no emiten evento:
- * ahi radica la idempotencia de las transiciones.
+ * Una transicion de estado se registra en alert_events solo cuando la
+ * maquina cambia de estado. from=None indica que no habia fila previa
+ * (INACTIVE). Los pasos Stay*/StartResolving/StayResolving no emiten
+ * evento; de ahi viene la idempotencia.
  */
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EventState {
@@ -393,11 +377,9 @@ pub struct Event {
     pub to: EventState,
 }
 
-/*
- * Operaciones que el evaluador le pide a db::apply_alert_steps (una
- * transaccion por ciclo). Los pasos que cambian de estado llevan el
- * `Event` que se inserta en `alert_events` en la misma transaccion.
- */
+/* Operaciones del ciclo de evaluacion, ejecutadas en una sola
+ * transaccion. Los pasos que cambian de estado llevan el Event que se
+ * inserta en alert_events en la misma transaccion. */
 #[derive(Debug, Clone, Copy)]
 pub enum AlertOp {
     Upsert {
@@ -427,14 +409,11 @@ pub struct EvalSummary {
 }
 
 /*
- * Un ciclo de evaluacion (bloque 5.2): reglas habilitadas -> ventana de
- * samples por (regla, agent) -> veredicto -> transicion -> persistencia
- * en `alerts`.
- *
- * El evaluador solo visita agents con series en la ventana, pero las
- * alertas activas de agents que dejaron de reportar (o de reglas
- * deshabilitadas) tambien se procesan: entran como "condicion ausente" y
- * la maquina las resuelve (o las mantiene en la ventana de hysteresis).
+ * Un ciclo de evaluacion: reglas habilitadas -> ventana de samples por
+ * (regla, agente) -> veredicto -> transicion -> persistencia en alerts.
+ * Las alertas activas de agentes que dejaron de reportar o de reglas
+ * deshabilitadas tambien se procesan: entran como condicion ausente y
+ * la maquina las resuelve o las mantiene en hysteresis.
  */
 pub async fn eval_cycle(
     pool: &PgPool,
@@ -490,8 +469,8 @@ pub async fn eval_cycle(
             db::recent_samples_for_rule(pool, &rule.metric_name, rule.entity.as_deref(), from)
                 .await?;
 
-        /* La query ordena por (agent_id, ts ASC): agrupar en un lugar
-         * solo. Por (regla, agent) son pocas decenas de puntos. */
+        /* La query ordena por (agent_id, ts ASC). Se agrupa aqui evitando
+         * una segunda pasada por la DB. */
         let mut series: Vec<(Uuid, Vec<SeriesPoint>)> = Vec::new();
         for s in samples {
             match series.last_mut() {
@@ -536,7 +515,7 @@ pub async fn eval_cycle(
 
         let rule_name = name_by_id.get(&rule_id).map(String::as_str).unwrap_or("?");
         let step = if cur.is_some() && !enabled_ids.contains(&rule_id) {
-            /* Regla deshabilitada/borrada: su alerta activa se resuelve. */
+            /* Regla deshabilitada o borrada: se resuelve la alerta activa. */
             Step::Resolved
         } else {
             next_step(cur, holding, now, config.alert_resolve_grace_secs)
@@ -664,13 +643,10 @@ pub async fn eval_cycle(
 }
 
 /*
- * Lanza el evaluador periodico. SIEMPRE consume un tick inmediato y
- * luego los intervalos; ante un fallo del ciclo (p.ej. DB caida) loguea
- * y sigue en el siguiente tick.
- *
- * Publica al bus los eventos de transicion SOLO cuando el ciclo termino
- * en OK: las transiciones ya estan commiteadas en `alerts`/`alert_events`
- * (misma atomicidad que el historial, bloque 5.3).
+ * Lanza el evaluador periodico. Ante un fallo del ciclo (por ejemplo, DB
+ * caida) loguea el error y continua en el siguiente tick. Los eventos de
+ * transicion se publican al bus solo despues de que el ciclo termino
+ * correctamente y las transiciones quedaron commiteadas.
  */
 pub fn spawn_evaluator(pool: PgPool, config: Arc<Config>, bus: EventBus) {
     tokio::spawn(async move {

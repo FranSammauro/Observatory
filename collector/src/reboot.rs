@@ -1,5 +1,5 @@
 /*
- * Deteccion de reboot (Fase 4, bloque 4.3).
+ * Deteccion de reboot.
  *
  * `system.uptime` es monotono (segundos desde el boot del host, medidos
  * por el agent en /proc/uptime). SIEMPRE sube entre muestras de un mismo

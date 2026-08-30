@@ -1,74 +1,44 @@
-# ADR-0002: Protocolo de transporte del agent
+# ADR-0002: Protocolo de transporte del agente
 
 ## Estado
 
-Aceptado (parcial - ver "Pendiente" abajo)
+Aceptado.
 
 ## Contexto
 
-El agent necesita enviar metricas y heartbeats al Collector de forma
-periodica (informe tecnico, secciones 21-27). El transporte debe:
-
-- tener timeouts explicitos de connect/write/read (nunca bloquear
-  indefinidamente);
-- reintentar con backoff exponencial + jitter ante fallos;
-- eventualmente viajar sobre TLS en produccion (seccion 23).
-
-## Alternativas consideradas para el cliente HTTP
-
-- **libcurl**: la opcion mas comun para HTTP en C. Trae manejo de TLS,
-  redirects, keep-alive, etc. "gratis".
-- **Sockets POSIX crudos + parser HTTP/1.1 manual**: sin dependencias,
-  control total sobre timeouts, footprint minimo.
+El agente necesita enviar metricas y heartbeats al collector con timeouts
+explicitos, reintentos ante fallos y, en entornos de produccion, cifrado
+del transporte.
 
 ## Decision
 
-Sockets POSIX crudos (`transport.c`), sin libcurl ni ninguna libreria
-HTTP externa.
+**HTTP/1.1 plano sobre sockets POSIX** en el agente, sin libcurl ni ninguna
+otra dependencia externa. El agente hace POST con body JSON y cabecera
+`Authorization: Bearer`. Los timeouts de connect/write/read se controlan
+con `setsockopt(SO_SNDTIMEO/SO_RCVTIMEO)` y `poll()`.
 
-Esto es consistente con la filosofia general del agent (informe
-secciones 6.1 y 73.2: pocas dependencias, no reinventar por sport pero
-tampoco traer un dependency tree grande para un cliente HTTP simple que
-solo necesita hacer POST con un body JSON conocido).
+El agente **no implementa TLS** y rechaza explicitamente URLs `https://`
+con un error claro en lugar de degradar silenciosamente a texto plano.
 
-## TLS: diferido a Fase 8 (Hardening)
+**TLS se termina en el collector**: el collector puede servir HTTPS nativo
+(rustls) para el dashboard y los clientes de navegador. Los agentes en
+redes confiables se conectan en texto plano directamente; los agentes
+remotos llegan a traves de un tunel (stunnel, WireGuard, SSH port
+forwarding) y el agente no necesita saber nada de TLS.
 
-Esta fase (Fase 2) implementa el transporte en **texto plano
-(`http://`)**. `transport_post()` rechaza explicitamente URLs
-`https://` con un error claro (`OBS_ERR_UNAVAILABLE` + log), en vez de
-degradar silenciosamente a texto plano bajo una URL que promete TLS -
-eso seria peor que fallar ruidosamente.
+## Justificacion
 
-Implementar TLS desde cero en C sobre sockets crudos (sin OpenSSL/
-libressl como dependencia) esta fuera de alcance razonable para este
-componente. La Fase 8 (Hardening, ver `PHASES.md`) evaluara entre:
-
-1. Enlazar contra OpenSSL/LibreSSL directamente (agrega una dependencia,
-   pero es la mas estandar para TLS en C).
-2. Terminar TLS en un reverse proxy / stunnel delante del Collector, y
-   dejar el agent hablando HTTP en plano solo dentro de una red
-   confiable o un tunel (mockeando parcialmente informe seccion 23,
-   que asume TLS end-to-end).
-
-La decision entre esas dos opciones se toma en Fase 8, con mas contexto
-sobre el entorno real de despliegue.
+Implementar TLS desde cero sobre sockets crudos en C, sin enlazar contra
+OpenSSL, esta fuera del alcance razonable de este componente. Enlazar
+contra OpenSSL agrega una dependencia mayor que contradice la filosofia del
+agente. La alternativa de tunel es mas simple, mas flexible y mas segura
+porque separa las responsabilidades: el agente hace lo que hace bien
+(recolectar y enviar), y el transporte seguro lo resuelve infraestructura
+existente.
 
 ## Consecuencias
 
-**Positivas**
-
-- Cero dependencias nuevas para el agent.
-- Control total y explicito sobre connect/write/read timeouts
-  (`setsockopt(SO_SNDTIMEO/SO_RCVTIMEO)`, `poll()` para el connect).
-- El parser de URL (`transport_parse_url`) y la logica de request/
-  response son testeables unitariamente sin abrir sockets.
-
-**Negativas**
-
-- Parser HTTP/1.1 minimo hecho a mano: no soporta chunked
-  transfer-encoding, redirects, ni keep-alive (se usa
-  `Connection: close` en cada request deliberadamente, para simplificar
-  la lectura de la respuesta).
-- Sin TLS hasta Fase 8 - **no usar en una red no confiable todavia**.
-  El default de `collector_url` se cambio a `http://127.0.0.1:8080`
-  (antes `https://...`) para reflejar el estado real de esta fase.
+El binario del agente no tiene dependencias dinamicas mas alla de la libc.
+El default de `collector_url` es `http://`; cualquier intento de usar
+`https://` falla en el arranque con un mensaje explicito. La arquitectura
+de red recomendada para entornos publicos es `agente -> tunel -> collector`.

@@ -10,7 +10,7 @@ use crate::config::{
 use crate::error::ApiError;
 
 /*
- * Query API (Fase 4, bloque 1): parsing y validacion de los parametros
+ * Parsing y validacion de los parametros
  * de `GET /api/v1/agents/:id/metrics/:metric`. Los handlers solo llaman
  * `into_filter()`; las reglas estan aca, puras y testeables sin DB.
  *
@@ -110,7 +110,7 @@ impl RebootsQuery {
 }
 
 /*
- * Query API de alertas (Fase 5, bloque 5.3):
+ * Parametros de consulta para alertas:
  *   - `GET /api/v1/alerts`            -> alertas activas (pending/firing).
  *   - `GET /api/v1/alerts/history`    -> historial de transiciones.
  * Mismo bearer token que el resto; las reglas de validacion estan aca,
@@ -228,7 +228,7 @@ impl CheckResultsQuery {
 }
 
 /*
- * Historial unificado (Fase 6, bloque 6.3). Consulta del timeline
+ * Parametros del timeline unificado de eventos:
  * `GET /api/v1/events/history`: recorta por agent (opcional) y devuelve
  * los ultimos `limit` eventos cruzando las cuatro fuentes (alertas,
  * health, reboots, conectividad) ordenados por timestamp desc. El merge

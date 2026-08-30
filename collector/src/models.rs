@@ -356,8 +356,8 @@ mod tests {
         assert!(p.validate().is_err());
     }
 
-    /* Fuzzing deterministico del pipeline de ingestion (Fase 8, bloque
-     * 8.3): JSON -> MetricsPayload -> validate() -> to_metric_rows().
+    /* Fuzzing deterministico del pipeline de ingestion:
+     * JSON -> MetricsPayload -> validate() -> to_metric_rows().
      *
      * Sin crates de fuzzing ni dependencias de rand: un xorshift64 propio
      * arma el corpus (payload valido real) y lo muta (bit flips, bytes

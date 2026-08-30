@@ -12,45 +12,32 @@
 #include "collectors/temperature.h"
 
 /*
- * Serializacion de los payloads de ingestion (informe tecnico, seccion
- * 21 y 24).
+ * Serializacion del payload JSON hacia el collector. El escritor es
+ * manual para no introducir dependencias externas; el formato del payload
+ * es estable y conocido, por lo que no es necesario un encoder generico.
  *
- * Deliberadamente NO usamos una libreria JSON externa: el payload es de
- * forma conocida, asi que un escritor manual mantiene el binario chico y
- * evita una dependencia mas (informe seccion 6.1).
- *
- * Dos payloads distintos, en linea con el heartbeat como canal
- * independiente de las metricas (informe seccion 24):
- *   - obs_sample_t     -> POST /api/v1/metrics
- *   - heartbeat         -> POST /api/v1/agents/heartbeat (mas liviano)
+ * Dos payloads distintos: el sample completo (metricas) y el heartbeat,
+ * que es un canal independiente de menor tamano.
  */
 
 typedef struct {
     const char *agent_id;
     unsigned long long timestamp_unix;
 
-    cpu_metrics_t cpu;                 /* cpu.valid indica si hay dato disponible */
+    cpu_metrics_t cpu;
     memory_metrics_t memory;
-    disk_metrics_t disk;               /* disk.valid indica si hay dato disponible */
-    network_metrics_t network;         /* network.valid indica si hay dato disponible */
+    disk_metrics_t disk;
+    network_metrics_t network;
     filesystem_metrics_t filesystem;
     uptime_metrics_t uptime;
     process_metrics_t process;
-    temperature_metrics_t temperature; /* temperature.available puede ser false */
+    temperature_metrics_t temperature;
 } obs_sample_t;
 
-/*
- * Escribe el payload JSON del sample en buffer (tamano buffer_size).
- * Devuelve OBS_OK, o OBS_ERR_OVERFLOW si no entra en el buffer.
- */
 obs_status_t protocol_serialize_sample(const obs_sample_t *sample,
                                         char *buffer,
                                         size_t buffer_size);
 
-/*
- * Escribe el payload JSON del heartbeat (mucho mas liviano que el
- * sample completo - solo identidad + timestamp).
- */
 obs_status_t protocol_serialize_heartbeat(const char *agent_id,
                                            unsigned long long timestamp_unix,
                                            char *buffer,

@@ -1,7 +1,7 @@
 use chrono::{DateTime, Duration, Utc};
 
 /*
- * Maquina de estados de conectividad (Fase 4, bloque 4.2).
+ * Maquina de estados de conectividad ONLINE/DEGRADED/OFFLINE.
  *
  * El estado se DERIVA de `agents.last_seen` (hora de arribe al servidor,
  * ADR-0003): es una funcion pura del lapso desde que oimos del agent, no

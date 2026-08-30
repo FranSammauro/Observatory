@@ -29,7 +29,7 @@ unsigned int retry_next_delay_secs(retry_policy_t *policy, unsigned int attempt)
     unsigned int delay = policy->base_secs;
 
     /* delay = base * 2^attempt, con clamp para evitar overflow y para
-     * respetar max_interval_secs (informe: 1,2,4,8,16,30,30,...). */
+     * respetar max_interval_secs. */
     for (unsigned int i = 0; i < attempt; i++) {
         if (delay >= policy->max_interval_secs) {
             delay = policy->max_interval_secs;
